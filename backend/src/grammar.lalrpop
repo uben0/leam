@@ -1,0 +1,67 @@
+use super::{Type, Inst, Module, Fun};
+
+grammar;
+
+pub Module: Module = "(" "module" <main:Fun> <funs:Fun*> ")" => {
+	let mut module = Module::new();
+	module.set_fn(0, main);
+	for fun in funs {
+		module.insert_fn(fun);
+	}
+	module
+};
+
+Fun: Fun
+	= "(" "fn" <inputs:(Type Index)*> <output_type:Type> <body:Inst> ")"
+	=> Fun {
+		output_type,
+		inputs,
+		body
+	};
+
+Type: Type = {
+	"unit" => Type::Unit,
+	"bool" => Type::Bool,
+	"i32" => Type::Int32,
+	"u32" => Type::Nat32,
+	"f32" => Type::Float32,
+	"fn" => Type::Fn,
+	"block" => Type::Block,
+}
+
+Inst: Inst = {
+	"(" "push" <t:Type> <b:Nat> <head:Inst> <tail:Inst> ")" => Inst::Push(t, b as usize, head.into(), tail.into()),
+	"(" "pull" <t:Type> <b:Nat> ")" => Inst::Pull(t, b as usize),
+	"(" "do" <insts:Inst*> <tail:Inst> ")" => Inst::Do(insts, tail.into()),
+	"(" "write" <t:Type> <i:Inst> ")" => Inst::Write(t, i.into()),
+	"(" "read" <t:Type> ")" => Inst::Read(t),
+	"(" "eq" <t:Type> <lhs:Inst> <rhs:Inst> ")" => Inst::Eq(t, lhs.into(), rhs.into()),
+	"(" "const" "i32" <v:Int> ")" => Inst::ConstInt32(v as i32),
+	"(" "const" "u32" <v:Nat> ")" => Inst::ConstNat32(v as u32),
+	"(" "const" "f32" <v:Float> ")" => Inst::ConstFloat32(v as f32),
+	"(" "const" "f32" <v:Int> ")" => Inst::ConstFloat32(v as f32),
+	"(" "const" "bool" <v:Bool> ")" => Inst::ConstBool(v),
+	"(" "const" "fn" <v:Index> ")" => Inst::ConstFn(v),
+	"(" "const" "unit" ")" => Inst::ConstUnit,
+	"(" "panic" ")" => Inst::Panic,
+	"(" "branch" <t:Type> <b:(<Inst> <Inst>)*> <d:Inst> ")" => Inst::Branch(t, b, d.into()),
+	"(" "call" <f:Inst> <i:Inst*> ")" => Inst::Call(f.into(), i),
+	"(" "group" <e:Inst*> ")" => Inst::Group(e),
+	"(" "extract" <t:Type> <i:Nat> <v:Inst> ")" => Inst::Extract(t, i as usize, v.into()),
+	"(" "add" <t:Type> <lhs:Inst> <rhs:Inst> ")" => Inst::Add(t, Box::new(lhs), Box::new(rhs)),
+	"(" "sub" <t:Type> <lhs:Inst> <rhs:Inst> ")" => Inst::Sub(t, Box::new(lhs), Box::new(rhs)),
+	"(" "mul" <t:Type> <lhs:Inst> <rhs:Inst> ")" => Inst::Mul(t, Box::new(lhs), Box::new(rhs)),
+	"(" "div" <t:Type> <lhs:Inst> <rhs:Inst> ")" => Inst::Div(t, Box::new(lhs), Box::new(rhs)),
+	"(" "and" <i:Inst*> ")" => Inst::And(i),
+	"(" "or" <i:Inst*> ")" => Inst::Or(i),
+}
+
+Index: usize = r"[0-9]+" => <>.parse().unwrap();
+Nat: u64 = r"[0-9]+" => <>.parse().unwrap();
+Int: i64 = r"(\+|\-)[0-9]+" => <>.parse().unwrap();
+Float: f64 = r"(\+|\-)[0-9]+\.[0-9]+" => <>.parse().unwrap();
+Bool: bool = {
+	"true" => true,
+	"false" => false,
+}
+

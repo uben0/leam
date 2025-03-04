@@ -1,0 +1,12 @@
+[package]
+name = "frontend"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+backend = { workspace = true }
+bevy_ecs = "0.15.3"
+lalrpop-util = { version = "0.22.1", features = ["lexer"] }
+
+[build-dependencies]
+lalrpop = "0.22.1"

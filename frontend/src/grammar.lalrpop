@@ -1,0 +1,77 @@
+use super::{Entity, Module, Span, TypeExpr};
+
+grammar(module: &mut Module);
+
+pub Module: Vec<Entity> = TopLevel*;
+
+List<T>: Vec<T> = <mut x:(<T> ",")*> <y:T?> => {
+    x.extend(y);
+    x
+};
+
+TopLevel: Entity = {
+	"type" <name:Camel> "(" <params:List<Lower>> ")" "{" <variants:(<Camel> "(" <List<Type>> ")")*> "}"
+		=> module.insert_type_def(name, params, variants),
+	"fn" <n:Lower> "(" <i:List<FunParam>> ")" <to:("->" <Type>)?> <body:Expr0>
+		=> module.insert_fn(n, i, to, body),
+}
+FunParam: (Span, Option<TypeExpr>) = {
+	Lower => (<>, None),
+	<name:Lower> ":" <ttype:Type> => (name, Some(ttype)),
+}
+
+Expr0: Entity = {
+	<l:@L> <v:Int> <r:@R> => module.insert_litt_int(v, Span(l, r)),
+	<l:@L> <v:Float> <r:@R> => module.insert_litt_float(v, Span(l, r)),
+	Lower => module.insert_ident(<>),
+	Camel => module.insert_ident(<>),
+	"{" <Chain> "}" => <>,
+}
+
+Expr1: Entity = {
+	Expr0,
+	<l:@L> <fun:Expr0> "(" <params:List<Expr3>> ")" <r:@R> => module.insert_call(fun, params, Span(l, r)),
+	<l:@L> "fn" "(" <ident:Lower> ")" <body:Expr0> <r:@R> => module.insert_lambda(ident, body, Span(l, r)),
+	"read" => module.insert_read(),
+	"write" <value:Expr1> => module.insert_write(value),
+	"case" <on:Expr1> "{" <branches:(<Pattern> "->" <Expr3>)*> "}" => module.insert_case(on, branches),
+}
+
+Expr2: Entity = {
+	Expr1,
+	<l:@L> <lhs:Expr2> "+" <rhs:Expr1> <r:@R> => module.insert_add(lhs, rhs, Span(l, r)),
+	<l:@L> <lhs:Expr2> "-" <rhs:Expr1> <r:@R> => module.insert_sub(lhs, rhs, Span(l, r)),
+}
+
+Expr3: Entity = {
+	Expr2,
+	<l:@L> <lhs:Expr3> "*" <rhs:Expr2> <r:@R> => module.insert_mul(lhs, rhs, Span(l, r)),
+	<l:@L> <lhs:Expr3> "/" <rhs:Expr2> <r:@R> => module.insert_div(lhs, rhs, Span(l, r)),
+}
+
+Chain: Entity = {
+	<insts:Expr3*> => module.insert_chain(insts),
+	<mut insts:Expr3*> "let" <ident:Lower> "=" <head:Expr3> <tail:Chain> => {
+		insts.push(module.insert_let(ident, head, tail));
+		module.insert_chain(insts)
+	},
+}
+
+Pattern: Entity = {
+	"_" => module.insert_pattern_any(),
+	Int => module.insert_pattern_litt_int(<>),
+	Lower => module.insert_pattern_ident(<>),
+	<l:@L> <label:Camel> "(" <fields:List<Pattern>> ")" <r:@R> => module.insert_pattern_variant(label, fields, Span(l, r)),
+}
+
+Type: TypeExpr = {
+	Camel => TypeExpr::Name(<>, Vec::new()),
+	<name:Camel> "(" <params:List<Type>> ")" => TypeExpr::Name(name, params),
+	Lower => TypeExpr::Var(<>),
+}
+
+Int: i32 = r"[0-9]+" => <>.parse().unwrap();
+Float: f32 = r"[0-9]+\.[0-9]+" => <>.parse().unwrap();
+Lower: Span = <l:@L> r"[a-z][a-z_]*" <r:@R> => Span(l, r);
+Camel: Span = <l:@L> r"[A-Z][a-z]*" <r:@R> => Span(l, r);
+

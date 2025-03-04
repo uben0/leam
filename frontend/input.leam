@@ -1,0 +1,6 @@
+fn main() {
+    let i = fn(i) {i}
+    write i(4)
+    write i(5.5)
+}
+
