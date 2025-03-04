@@ -521,22 +521,6 @@ impl Module {
         self.world.entity_mut(poly).insert(Polymorph { params });
         poly
     }
-    // fn make_polymorph(&mut self, entity: Entity, vars: Vec<Entity>) {
-    //     assert_eq!(self.compilation_stage, CompileStage::Binding);
-    //     assert!(self.world.get::<Type>(entity).is_some());
-    //     for (index, var) in vars.iter().enumerate() {
-    //         assert!(self.type_contains(entity, *var));
-    //         let var_type = &mut self.world.get_mut::<Type>(*var).unwrap();
-    //         assert_eq!(var_type.state, TypeState::Unknown);
-    //         var_type.state = TypeState::Parameter {
-    //             poly: entity,
-    //             index,
-    //         };
-    //     }
-    //     self.world
-    //         .entity_mut(entity)
-    //         .insert(Polymorph { params: vars });
-    // }
     fn set_type(&mut self, entity: Entity, ttype: Entity) {
         assert_eq!(self.compilation_stage, CompileStage::Binding);
         assert!(self.world.get::<HasType>(entity).is_none());
@@ -1422,35 +1406,41 @@ impl Module {
             }
         }
     }
-    fn export_pattern_bind_to_machine(
+    fn export_pattern_bind_to_machine<'a>(
         &self,
         pattern: Entity,
         poly_context: &PolyContext,
         on_inst: Inst,
-        tail: Inst,
         module: &mut backend::Module,
-        bindings: &mut HashMap<(Entity, PolyContext), Inst>,
-    ) -> Inst {
+        mut bindings: Box<
+            dyn FnMut(Entity, &PolyContext, Entity, &mut backend::Module) -> Inst + 'a,
+        >,
+    ) -> Box<dyn FnMut(Entity, &PolyContext, Entity, &mut backend::Module) -> Inst + 'a> {
         assert_eq!(self.compilation_stage, CompileStage::Exporting);
         match *self.get(pattern) {
-            Pattern::Any => tail,
-            Pattern::Int(_) => tail,
+            Pattern::Any => bindings,
+            Pattern::Int(_) => bindings,
             Pattern::Ident { binding, .. } => {
-                self.register_machine_binding(poly_context, binding, on_inst, bindings);
-                tail
+                let poly_context = poly_context.clone();
+                Box::new(move |b, pc, ut, m| {
+                    if b == binding && *pc == poly_context {
+                        on_inst.clone()
+                    } else {
+                        bindings(b, pc, ut, m)
+                    }
+                })
             }
             Pattern::Variant {
                 ref fields_pattern, ..
             } => fields_pattern.iter().copied().enumerate().fold(
-                tail,
-                |tail, (index, field_pattern)| {
+                bindings,
+                |bindings, (index, field_pattern)| {
                     let HasType(field_type) = *self.get(field_pattern);
                     let ttype = self.machine_type(poly_context, field_type);
                     self.export_pattern_bind_to_machine(
                         field_pattern,
                         poly_context,
                         Inst::Extract(ttype, index + 1, Box::new(on_inst.clone())),
-                        tail,
                         module,
                         bindings,
                     )
@@ -1475,7 +1465,7 @@ impl Module {
         function_index: usize,
         function: Entity,
         module: &mut backend::Module,
-        bindings: &mut HashMap<(Entity, PolyContext), Inst>,
+        bindings: &mut dyn FnMut(Entity, &PolyContext, Entity, &mut backend::Module) -> Inst,
     ) {
         let binding = self.get::<Fun>(function).binding;
         let HasType(binding_type) = *self.get(binding);
@@ -1532,21 +1522,8 @@ impl Module {
     }
 
     // TODO: use an parametric type for compile stages, and impl only on appropritate types
-    fn register_machine_binding(
-        &self,
-        poly_context: &PolyContext,
-        binding: Entity,
-        inst: Inst,
-        bindings: &mut HashMap<(Entity, PolyContext), Inst>,
-    ) {
-        assert_eq!(self.compilation_stage, CompileStage::Exporting);
-        let prev = bindings.insert((binding, poly_context.clone()), inst.clone());
-        if let Some(prev) = prev {
-            assert_eq!(prev, inst);
-        }
-    }
 
-    fn resolve_machine_binding(
+    fn resolve_top_level_binding(
         &self,
         poly_context: &PolyContext,
         binding: Entity,
@@ -1599,7 +1576,7 @@ impl Module {
                     function_index,
                     function,
                     module,
-                    bindings,
+                    &mut |b, pc, ut, m| self.resolve_top_level_binding(pc, b, ut, m, bindings),
                 );
                 inst
             }
@@ -1628,7 +1605,7 @@ impl Module {
         compute: Entity,
         poly_context: &PolyContext,
         module: &mut backend::Module,
-        bindings: &mut HashMap<(Entity, PolyContext), Inst>,
+        bindings: &mut dyn FnMut(Entity, &PolyContext, Entity, &mut backend::Module) -> Inst,
     ) -> Inst {
         assert_eq!(self.compilation_stage, CompileStage::Exporting);
         let HasType(ttype) = *self.get(compute);
@@ -1699,9 +1676,7 @@ impl Module {
                     .collect(),
             ),
             Compute::Ident { binding, .. } => {
-                let binding = binding.unwrap();
-                let HasType(ttype) = *self.get(compute);
-                self.resolve_machine_binding(&poly_context, binding, ttype, module, bindings)
+                bindings(binding.unwrap(), poly_context, ttype, module)
             }
             Compute::Let {
                 binding,
@@ -1709,21 +1684,23 @@ impl Module {
                 tail,
                 ..
             } => {
+                let head = self.export_compute_to_machine(head, poly_context, module, bindings);
+
                 let HasType(binding_type) = *self.get(binding);
                 let binding_type = self.machine_type(poly_context, binding_type);
                 let binding_id = module.new_id();
-                self.register_machine_binding(
-                    poly_context,
-                    binding,
-                    Inst::Pull(binding_type, binding_id),
-                    bindings,
-                );
-                Inst::Push(
-                    binding_type,
-                    binding_id,
-                    Box::new(self.export_compute_to_machine(head, poly_context, module, bindings)),
-                    Box::new(self.export_compute_to_machine(tail, poly_context, module, bindings)),
-                )
+                let poly_context2 = poly_context.clone();
+                let mut bindings = move |b, pc: &PolyContext, ut, m: &mut backend::Module| {
+                    if b == binding && *pc == poly_context2 {
+                        Inst::Pull(binding_type, binding_id)
+                    } else {
+                        bindings(b, pc, ut, m)
+                    }
+                };
+                let tail =
+                    self.export_compute_to_machine(tail, &poly_context, module, &mut bindings);
+
+                Inst::Push(binding_type, binding_id, Box::new(head), Box::new(tail))
             }
             Compute::Lambda { binding, body, .. } => {
                 let HasType(binding_type) = *self.get(binding);
@@ -1731,13 +1708,16 @@ impl Module {
                 let input_type = self.machine_type(poly_context, binding_type);
                 let output_type = self.machine_type(poly_context, body_type);
                 let input_binding_id = module.new_id();
-                self.register_machine_binding(
-                    &poly_context,
-                    binding,
-                    Inst::Pull(input_type, input_binding_id),
-                    bindings,
-                );
-                let body = self.export_compute_to_machine(body, poly_context, module, bindings);
+                let poly_context2 = poly_context.clone();
+                let mut bindings = move |b, pc: &PolyContext, ut, m: &mut backend::Module| {
+                    if b == binding && *pc == poly_context2 {
+                        Inst::Pull(input_type, input_binding_id)
+                    } else {
+                        bindings(b, pc, ut, m)
+                    }
+                };
+                let body =
+                    self.export_compute_to_machine(body, poly_context, module, &mut bindings);
                 Inst::ConstFn(module.insert_fn(backend::Fun {
                     inputs: Vec::from([(input_type, input_binding_id)]),
                     output_type,
@@ -1750,8 +1730,15 @@ impl Module {
                 let on_type = self.machine_type(poly_context, on_type);
                 let ttype = self.machine_type(poly_context, ttype);
                 let on_binding = module.new_id();
-                let mut thens = Vec::new();
+                let mut thens: Vec<(Inst, Inst)> = Vec::new();
                 for (pattern, value) in branches {
+                    let mut export_pattern_bind_to_machine = self.export_pattern_bind_to_machine(
+                        pattern,
+                        poly_context,
+                        Inst::Pull(on_type, on_binding),
+                        module,
+                        Box::new(|a, b, c, d| bindings(a, b, c, d)),
+                    );
                     thens.push((
                         self.export_pattern_match_to_machine(
                             pattern,
@@ -1760,13 +1747,11 @@ impl Module {
                             on_type,
                             module,
                         ),
-                        self.export_pattern_bind_to_machine(
-                            pattern,
+                        self.export_compute_to_machine(
+                            value,
                             poly_context,
-                            Inst::Pull(on_type, on_binding),
-                            self.export_compute_to_machine(value, poly_context, module, bindings),
                             module,
-                            bindings,
+                            &mut export_pattern_bind_to_machine,
                         ),
                     ));
                 }
@@ -1839,7 +1824,7 @@ impl Module {
         function_index: usize,
         function: Entity,
         module: &mut backend::Module,
-        bindings: &mut HashMap<(Entity, PolyContext), Inst>,
+        bindings: &mut dyn FnMut(Entity, &PolyContext, Entity, &mut backend::Module) -> Inst,
     ) {
         assert_eq!(self.compilation_stage, CompileStage::Exporting);
         let function_data: &Fun = self.get(function);
@@ -1853,25 +1838,33 @@ impl Module {
         assert_eq!(poly_data.params.len(), poly_context.params.len());
         assert_eq!(function_type, poly_context.poly_type);
 
-        let inputs = function_data
+        let (inputs, inputs_binding): (Vec<_>, Vec<_>) = function_data
             .inputs
             .iter()
             .map(|FunParam { binding, .. }| {
                 let HasType(binding_type) = *self.get(*binding);
                 let binding_type = self.machine_type(&poly_context, binding_type);
                 let binding_id = module.new_id();
-                self.register_machine_binding(
-                    &poly_context,
-                    *binding,
-                    Inst::Pull(binding_type, binding_id),
-                    bindings,
-                );
-                (binding_type, binding_id)
+                (
+                    (binding_type, binding_id),
+                    (*binding, Inst::Pull(binding_type, binding_id)),
+                )
             })
-            .collect();
+            .unzip();
         let HasType(body_type) = *self.get(function_data.body);
-        let body =
-            self.export_compute_to_machine(function_data.body, poly_context, module, bindings);
+        let body = self.export_compute_to_machine(
+            function_data.body,
+            poly_context,
+            module,
+            &mut move |b, pc, ut, m| {
+                for (binding, inst) in inputs_binding.iter() {
+                    if b == *binding && pc == poly_context {
+                        return inst.clone();
+                    }
+                }
+                bindings(b, pc, ut, m)
+            },
+        );
         module.set_fn(
             function_index,
             backend::Fun {
@@ -1984,7 +1977,10 @@ fn main() {
     module.stage_exporting();
 
     let mut machine = backend::Module::new();
-    let mut bindings = HashMap::new();
+    let mut bindings_map = HashMap::new();
+    let mut bindings = |b: Entity, pc: &PolyContext, ut, m: &mut backend::Module| {
+        module.resolve_top_level_binding(pc, b, ut, m, &mut bindings_map)
+    };
     module.export_mono_function_to_machine(
         backend::Module::MAIN,
         main.unwrap(),

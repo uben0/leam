@@ -123,13 +123,6 @@ impl Mem {
             bindings: Vec::new(),
         }
     }
-    // fn set(&mut self, binding: usize, value: Value) {
-    //     while self.bindings.get(binding).is_none() {
-    //         self.bindings.push(Vec::new());
-    //     }
-    //     assert!(self.bindings[binding].is_empty());
-    //     self.bindings[binding].push(value);
-    // }
     fn get(&self, binding: usize) -> Value {
         let Some(value) = self.bindings.get(binding).and_then(|b| b.last()) else {
             panic!("unallocated binding {:?}", binding);
@@ -145,16 +138,6 @@ impl Mem {
     fn pop(&mut self, binding: usize) {
         self.bindings[binding].pop().unwrap();
     }
-    // fn eq(&self, other: &Self) -> bool {
-    //     for i in 0..self.bindings.len().max(other.bindings.len()) {
-    //         let lhs = self.bindings.get(i).map(|t| t.len()).unwrap_or(0);
-    //         let rhs = other.bindings.get(i).map(|t| t.len()).unwrap_or(0);
-    //         if lhs != rhs || lhs > 1 {
-    //             return false;
-    //         }
-    //     }
-    //     true
-    // }
 }
 
 impl Module {
@@ -165,6 +148,30 @@ impl Module {
             counter: 0,
             functions: Vec::from([Fun::default()]),
         }
+    }
+
+    pub fn insert_fun(
+        &mut self,
+        index: usize,
+        inputs_type: Vec<Type>,
+        output_type: Type,
+        body: impl Fn(ComputeWritter, &[Inst]) -> Inst,
+    ) {
+        let (inputs, bindings): (Vec<_>, Vec<_>) = inputs_type
+            .into_iter()
+            .enumerate()
+            .map(|(index, ttype)| ((ttype, index), Inst::Pull(ttype, index)))
+            .unzip();
+        self.functions[index] = Fun {
+            output_type,
+            inputs,
+            body: body(
+                ComputeWritter {
+                    counter: bindings.len(),
+                },
+                &bindings,
+            ),
+        };
     }
 
     pub fn reserve_fn(&mut self) -> usize {
@@ -340,6 +347,25 @@ impl Module {
                 self.run_fun(self.functions.get(function).unwrap(), inputs, mem)
             }
         }
+    }
+}
+
+pub struct ComputeWritter {
+    counter: usize,
+}
+impl ComputeWritter {
+    pub fn push(self: Self, ttype: Type, head: Inst, tail: impl Fn(Self, Inst) -> Inst) -> Inst {
+        Inst::Push(
+            ttype,
+            self.counter,
+            Box::new(head),
+            Box::new(tail(
+                Self {
+                    counter: self.counter + 1,
+                },
+                Inst::Pull(ttype, self.counter),
+            )),
+        )
     }
 }
 
