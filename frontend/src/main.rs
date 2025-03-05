@@ -1,4 +1,4 @@
-use backend::{Inst, Writtable};
+use backend::{Exporter, Inst, Value, Writtable};
 use bevy_ecs::prelude::*;
 use std::{
     collections::{HashMap, hash_map::Entry},
@@ -1352,19 +1352,18 @@ impl Module {
         &self,
         pattern: Entity,
         poly_context: &PolyContext,
-        on_binding: usize,
+        on: Inst,
         on_type: backend::Type,
-        module: &mut backend::Module,
     ) -> Inst {
         assert_eq!(self.compilation_stage, CompileStage::Exporting);
         match *self.get(pattern) {
-            Pattern::Any => Inst::ConstBool(true),
+            Pattern::Any => Inst::Const(Value::Bool(true)),
             Pattern::Int(value) => Inst::Eq(
                 on_type,
-                Box::new(Inst::Pull(on_type, on_binding)),
-                Box::new(Inst::ConstInt32(value)),
+                Box::new(on),
+                Box::new(Inst::Const(Value::Int32(value))),
             ),
-            Pattern::Ident { .. } => Inst::ConstBool(true),
+            Pattern::Ident { .. } => Inst::Const(Value::Bool(true)),
             Pattern::Variant {
                 ref fields_pattern,
                 index,
@@ -1373,36 +1372,23 @@ impl Module {
                 let mut matchers = Vec::new();
                 matchers.push(Inst::Eq(
                     backend::Type::Nat32,
-                    Box::new(Inst::ConstNat32(index.unwrap() as u32)),
-                    Box::new(Inst::Extract(
-                        backend::Type::Nat32,
-                        0,
-                        Box::new(Inst::Pull(on_type, on_binding)),
-                    )),
+                    Box::new(Inst::Const(Value::Nat32(index.unwrap() as u32))),
+                    Box::new(Inst::Extract(backend::Type::Nat32, 0, Box::new(on.clone()))),
                 ));
                 for (index, field_pattern) in fields_pattern.iter().copied().enumerate() {
-                    let field_binding = module.new_id();
+                    // let field_binding = module.new_id();
                     let HasType(field_type) = *self.get(field_pattern);
                     let ttype = self.machine_type(poly_context, field_type);
 
-                    matchers.push(Inst::Push(
+                    matchers.push(self.export_pattern_match_to_machine(
+                        field_pattern,
+                        poly_context,
+                        Inst::Extract(ttype, index + 1, Box::new(on.clone())),
                         ttype,
-                        field_binding,
-                        Box::new(Inst::Extract(
-                            ttype,
-                            index + 1,
-                            Box::new(Inst::Pull(on_type, on_binding)),
-                        )),
-                        Box::new(self.export_pattern_match_to_machine(
-                            field_pattern,
-                            poly_context,
-                            field_binding,
-                            ttype,
-                            module,
-                        )),
                     ));
                 }
-                Inst::And(matchers)
+
+                Inst::and(matchers)
             }
         }
     }
@@ -1411,11 +1397,9 @@ impl Module {
         pattern: Entity,
         poly_context: &PolyContext,
         on_inst: Inst,
-        module: &mut backend::Module,
-        mut bindings: Box<
-            dyn FnMut(Entity, &PolyContext, Entity, &mut backend::Module) -> Inst + 'a,
-        >,
-    ) -> Box<dyn FnMut(Entity, &PolyContext, Entity, &mut backend::Module) -> Inst + 'a> {
+        // module: ComputeWritter,
+        mut bindings: Box<dyn FnMut(Entity, &PolyContext, Entity, Exporter) -> Inst + 'a>,
+    ) -> Box<dyn FnMut(Entity, &PolyContext, Entity, Exporter) -> Inst + 'a> {
         assert_eq!(self.compilation_stage, CompileStage::Exporting);
         match *self.get(pattern) {
             Pattern::Any => bindings,
@@ -1441,7 +1425,7 @@ impl Module {
                         field_pattern,
                         poly_context,
                         Inst::Extract(ttype, index + 1, Box::new(on_inst.clone())),
-                        module,
+                        // module,
                         bindings,
                     )
                 },
@@ -1464,8 +1448,8 @@ impl Module {
         &self,
         function_index: usize,
         function: Entity,
-        module: &mut backend::Module,
-        bindings: &mut dyn FnMut(Entity, &PolyContext, Entity, &mut backend::Module) -> Inst,
+        module: Exporter,
+        bindings: &mut dyn FnMut(Entity, &PolyContext, Entity, Exporter) -> Inst,
     ) {
         let binding = self.get::<Fun>(function).binding;
         let HasType(binding_type) = *self.get(binding);
@@ -1480,8 +1464,8 @@ impl Module {
         function_index: usize,
         type_def: Entity,
         index: usize,
-        module: &mut backend::Module,
-    ) {
+        mut module: Exporter,
+    ) -> Inst {
         let variant = &self.get::<TypeDef>(type_def).variants[index];
         println!(
             "exporting {PURPLE}{}{:?}{RESET} at index {YELLOW}{}{RESET}",
@@ -1493,32 +1477,17 @@ impl Module {
         let (inputs, output) = self.extract_fn_type(binding_type);
         let inputs: Vec<_> = inputs
             .into_iter()
-            .map(|input_type| {
-                (
-                    self.machine_type(&poly_context, input_type),
-                    module.new_id(),
-                )
-            })
+            .map(|input_type| self.machine_type(&poly_context, input_type))
             .collect();
         let output_type = self.machine_type(&poly_context, output);
-
-        module.set_fn(
-            function_index,
-            backend::Fun {
-                body: Inst::Group(
-                    [Inst::ConstNat32(index as u32)]
-                        .into_iter()
-                        .chain(
-                            inputs
-                                .iter()
-                                .map(|(ttype, binding)| Inst::Pull(*ttype, *binding)),
-                        )
-                        .collect(),
-                ),
-                inputs,
-                output_type,
-            },
-        );
+        module.insert_fun(function_index, inputs, output_type, |_, i| {
+            Inst::Group(
+                [Inst::Const(Value::Nat32(index as u32))]
+                    .into_iter()
+                    .chain(i)
+                    .collect(),
+            )
+        })
     }
 
     // TODO: use an parametric type for compile stages, and impl only on appropritate types
@@ -1528,7 +1497,7 @@ impl Module {
         poly_context: &PolyContext,
         binding: Entity,
         usage_type: Entity,
-        module: &mut backend::Module,
+        mut module: Exporter,
         bindings: &mut HashMap<(Entity, PolyContext), Inst>,
     ) -> Inst {
         assert_eq!(self.compilation_stage, CompileStage::Exporting);
@@ -1569,7 +1538,7 @@ impl Module {
         match self.get::<Binding>(binding).origin {
             BindingOrigin::FunctionDecl(function) => {
                 let function_index = module.reserve_fn();
-                let inst = Inst::ConstFn(function_index);
+                let inst = Inst::Const(Value::Fn(function_index));
                 bindings.insert((binding, context.clone()), inst.clone());
                 self.export_function_to_machine(
                     &context,
@@ -1582,7 +1551,7 @@ impl Module {
             }
             BindingOrigin::Variant { type_def, index } => {
                 let function_index = module.reserve_fn();
-                let inst = Inst::ConstFn(function_index);
+                let inst = Inst::Const(Value::Fn(function_index));
                 bindings.insert((binding, context.clone()), inst.clone());
                 self.export_variant_constructor_to_machine(
                     &context,
@@ -1594,8 +1563,9 @@ impl Module {
                 inst
             }
             BindingOrigin::Simple => {
-                let machine_type = self.machine_type(&context, usage_type);
-                Inst::Pull(machine_type, module.new_id())
+                panic!()
+                // let machine_type = self.machine_type(&context, usage_type);
+                // Inst::Pull(machine_type, module.new_id())
             }
         }
     }
@@ -1604,79 +1574,139 @@ impl Module {
         &self,
         compute: Entity,
         poly_context: &PolyContext,
-        module: &mut backend::Module,
-        bindings: &mut dyn FnMut(Entity, &PolyContext, Entity, &mut backend::Module) -> Inst,
+        mut exporter: Exporter,
+        bindings: &mut dyn FnMut(Entity, &PolyContext, Entity, Exporter) -> Inst,
     ) -> Inst {
         assert_eq!(self.compilation_stage, CompileStage::Exporting);
         let HasType(ttype) = *self.get(compute);
         match *self.get(compute) {
-            Compute::Nil => Inst::ConstUnit,
-            Compute::Int(value) => Inst::ConstInt32(value),
-            Compute::Float(value) => Inst::ConstFloat32(value),
-            Compute::Bool(value) => Inst::ConstBool(value),
+            Compute::Nil => Inst::Const(Value::Unit),
+            Compute::Int(value) => Inst::Const(Value::Int32(value)),
+            Compute::Float(value) => Inst::Const(Value::Float32(value)),
+            Compute::Bool(value) => Inst::Const(Value::Bool(value)),
             Compute::Add(lhs, rhs) => {
                 let ttype = self.machine_type(poly_context, ttype);
                 Inst::Add(
                     ttype,
-                    Box::new(self.export_compute_to_machine(lhs, poly_context, module, bindings)),
-                    Box::new(self.export_compute_to_machine(rhs, poly_context, module, bindings)),
+                    Box::new(self.export_compute_to_machine(
+                        lhs,
+                        poly_context,
+                        exporter.get(),
+                        bindings,
+                    )),
+                    Box::new(self.export_compute_to_machine(
+                        rhs,
+                        poly_context,
+                        exporter.get(),
+                        bindings,
+                    )),
                 )
             }
             Compute::Sub(lhs, rhs) => {
                 let ttype = self.machine_type(poly_context, ttype);
                 Inst::Sub(
                     ttype,
-                    Box::new(self.export_compute_to_machine(lhs, poly_context, module, bindings)),
-                    Box::new(self.export_compute_to_machine(rhs, poly_context, module, bindings)),
+                    Box::new(self.export_compute_to_machine(
+                        lhs,
+                        poly_context,
+                        exporter.get(),
+                        bindings,
+                    )),
+                    Box::new(self.export_compute_to_machine(
+                        rhs,
+                        poly_context,
+                        exporter.get(),
+                        bindings,
+                    )),
                 )
             }
             Compute::Mul(lhs, rhs) => {
                 let ttype = self.machine_type(poly_context, ttype);
                 Inst::Mul(
                     ttype,
-                    Box::new(self.export_compute_to_machine(lhs, poly_context, module, bindings)),
-                    Box::new(self.export_compute_to_machine(rhs, poly_context, module, bindings)),
+                    Box::new(self.export_compute_to_machine(
+                        lhs,
+                        poly_context,
+                        exporter.get(),
+                        bindings,
+                    )),
+                    Box::new(self.export_compute_to_machine(
+                        rhs,
+                        poly_context,
+                        exporter.get(),
+                        bindings,
+                    )),
                 )
             }
             Compute::Div(lhs, rhs) => {
                 let ttype = self.machine_type(poly_context, ttype);
                 Inst::Div(
                     ttype,
-                    Box::new(self.export_compute_to_machine(lhs, poly_context, module, bindings)),
-                    Box::new(self.export_compute_to_machine(rhs, poly_context, module, bindings)),
+                    Box::new(self.export_compute_to_machine(
+                        lhs,
+                        poly_context,
+                        exporter.get(),
+                        bindings,
+                    )),
+                    Box::new(self.export_compute_to_machine(
+                        rhs,
+                        poly_context,
+                        exporter.get(),
+                        bindings,
+                    )),
                 )
             }
             Compute::Read => {
                 let ttype = self.machine_type(poly_context, ttype);
-                Inst::Read(ttype)
+                Inst::Input(ttype)
             }
             Compute::Write(value) => {
                 let ttype = self.machine_type(poly_context, ttype);
-                Inst::Write(
+                Inst::Output(
                     ttype,
-                    Box::new(self.export_compute_to_machine(value, poly_context, module, bindings)),
+                    Box::new(self.export_compute_to_machine(
+                        value,
+                        poly_context,
+                        exporter,
+                        bindings,
+                    )),
                 )
             }
             Compute::Chain(ref insts, tail) => Inst::Do(
                 insts
                     .iter()
                     .map(|inst| {
-                        self.export_compute_to_machine(*inst, poly_context, module, bindings)
+                        self.export_compute_to_machine(
+                            *inst,
+                            poly_context,
+                            exporter.get(),
+                            bindings,
+                        )
                     })
                     .collect(),
-                Box::new(self.export_compute_to_machine(tail, poly_context, module, bindings)),
+                Box::new(self.export_compute_to_machine(tail, poly_context, exporter, bindings)),
             ),
             Compute::Call(function, ref parameters) => Inst::Call(
-                Box::new(self.export_compute_to_machine(function, poly_context, module, bindings)),
+                Box::new(self.export_compute_to_machine(
+                    function,
+                    poly_context,
+                    exporter.get(),
+                    bindings,
+                )),
                 parameters
                     .iter()
                     .map(|param| {
-                        self.export_compute_to_machine(*param, poly_context, module, bindings)
+                        self.export_compute_to_machine(
+                            *param,
+                            poly_context,
+                            exporter.get(),
+                            bindings,
+                        )
                     })
                     .collect(),
             ),
             Compute::Ident { binding, .. } => {
-                bindings(binding.unwrap(), poly_context, ttype, module)
+                bindings(binding.unwrap(), poly_context, ttype, exporter.get())
             }
             Compute::Let {
                 binding,
@@ -1684,83 +1714,87 @@ impl Module {
                 tail,
                 ..
             } => {
-                let head = self.export_compute_to_machine(head, poly_context, module, bindings);
-
                 let HasType(binding_type) = *self.get(binding);
                 let binding_type = self.machine_type(poly_context, binding_type);
-                let binding_id = module.new_id();
-                let poly_context2 = poly_context.clone();
-                let mut bindings = move |b, pc: &PolyContext, ut, m: &mut backend::Module| {
-                    if b == binding && *pc == poly_context2 {
-                        Inst::Pull(binding_type, binding_id)
-                    } else {
-                        bindings(b, pc, ut, m)
-                    }
-                };
-                let tail =
-                    self.export_compute_to_machine(tail, &poly_context, module, &mut bindings);
-
-                Inst::Push(binding_type, binding_id, Box::new(head), Box::new(tail))
+                let head =
+                    self.export_compute_to_machine(head, poly_context, exporter.get(), bindings);
+                exporter.write(binding_type, head, |exporter, head| {
+                    self.export_compute_to_machine(
+                        tail,
+                        &poly_context,
+                        exporter,
+                        &mut |b, pc, ut, exporter| {
+                            if b == binding && pc == poly_context {
+                                head.clone()
+                            } else {
+                                bindings(b, pc, ut, exporter)
+                            }
+                        },
+                    )
+                })
             }
             Compute::Lambda { binding, body, .. } => {
                 let HasType(binding_type) = *self.get(binding);
                 let HasType(body_type) = *self.get(body);
                 let input_type = self.machine_type(poly_context, binding_type);
                 let output_type = self.machine_type(poly_context, body_type);
-                let input_binding_id = module.new_id();
-                let poly_context2 = poly_context.clone();
-                let mut bindings = move |b, pc: &PolyContext, ut, m: &mut backend::Module| {
-                    if b == binding && *pc == poly_context2 {
-                        Inst::Pull(input_type, input_binding_id)
-                    } else {
-                        bindings(b, pc, ut, m)
-                    }
-                };
-                let body =
-                    self.export_compute_to_machine(body, poly_context, module, &mut bindings);
-                Inst::ConstFn(module.insert_fn(backend::Fun {
-                    inputs: Vec::from([(input_type, input_binding_id)]),
+                let index = exporter.reserve_fn();
+                exporter.insert_fun(
+                    index,
+                    Vec::from([input_type]),
                     output_type,
-                    body,
-                }))
+                    |exporter, mut inputs| {
+                        let input = inputs.pop().unwrap();
+                        self.export_compute_to_machine(
+                            body,
+                            poly_context,
+                            exporter,
+                            &mut |b, pc, ut, exporter| {
+                                if b == binding && pc == poly_context {
+                                    input.clone()
+                                } else {
+                                    bindings(b, pc, ut, exporter)
+                                }
+                            },
+                        )
+                    },
+                )
             }
             Compute::Case { on, ref branches } => {
                 let HasType(on_type) = *self.get(on);
                 let branches = branches.clone();
                 let on_type = self.machine_type(poly_context, on_type);
                 let ttype = self.machine_type(poly_context, ttype);
-                let on_binding = module.new_id();
-                let mut thens: Vec<(Inst, Inst)> = Vec::new();
-                for (pattern, value) in branches {
-                    let mut export_pattern_bind_to_machine = self.export_pattern_bind_to_machine(
-                        pattern,
-                        poly_context,
-                        Inst::Pull(on_type, on_binding),
-                        module,
-                        Box::new(|a, b, c, d| bindings(a, b, c, d)),
-                    );
-                    thens.push((
-                        self.export_pattern_match_to_machine(
-                            pattern,
-                            poly_context,
-                            on_binding,
-                            on_type,
-                            module,
-                        ),
-                        self.export_compute_to_machine(
-                            value,
-                            poly_context,
-                            module,
-                            &mut export_pattern_bind_to_machine,
-                        ),
-                    ));
-                }
-                Inst::Push(
-                    on_type,
-                    on_binding,
-                    Box::new(self.export_compute_to_machine(on, poly_context, module, bindings)),
-                    Box::new(Inst::Branch(ttype, thens, Box::new(Inst::Panic))),
-                )
+                let head =
+                    self.export_compute_to_machine(on, poly_context, exporter.get(), bindings);
+                exporter.write(on_type, head, |mut w, on| {
+                    let mut thens: Vec<(Inst, Inst)> = Vec::new();
+                    for (pattern, value) in branches.clone() {
+                        let mut export_pattern_bind_to_machine = self
+                            .export_pattern_bind_to_machine(
+                                pattern,
+                                poly_context,
+                                on.clone(),
+                                // w,
+                                Box::new(|a, b, c, d| bindings(a, b, c, d)),
+                            );
+                        thens.push((
+                            self.export_pattern_match_to_machine(
+                                pattern,
+                                poly_context,
+                                on.clone(),
+                                on_type,
+                            ),
+                            self.export_compute_to_machine(
+                                value,
+                                poly_context,
+                                w.get(),
+                                &mut export_pattern_bind_to_machine,
+                            ),
+                        ));
+                    }
+                    Inst::Branch(ttype, thens, Box::new(Inst::Panic))
+                })
             }
         }
     }
@@ -1823,9 +1857,9 @@ impl Module {
         poly_context: &PolyContext,
         function_index: usize,
         function: Entity,
-        module: &mut backend::Module,
-        bindings: &mut dyn FnMut(Entity, &PolyContext, Entity, &mut backend::Module) -> Inst,
-    ) {
+        mut exporter: Exporter,
+        bindings: &mut dyn FnMut(Entity, &PolyContext, Entity, Exporter) -> Inst,
+    ) -> Inst {
         assert_eq!(self.compilation_stage, CompileStage::Exporting);
         let function_data: &Fun = self.get(function);
         println!(
@@ -1838,41 +1872,39 @@ impl Module {
         assert_eq!(poly_data.params.len(), poly_context.params.len());
         assert_eq!(function_type, poly_context.poly_type);
 
-        let (inputs, inputs_binding): (Vec<_>, Vec<_>) = function_data
+        let (inputs_type, inputs_binding): (Vec<_>, Vec<_>) = function_data
             .inputs
             .iter()
             .map(|FunParam { binding, .. }| {
                 let HasType(binding_type) = *self.get(*binding);
                 let binding_type = self.machine_type(&poly_context, binding_type);
-                let binding_id = module.new_id();
-                (
-                    (binding_type, binding_id),
-                    (*binding, Inst::Pull(binding_type, binding_id)),
-                )
+                (binding_type, *binding)
             })
             .unzip();
         let HasType(body_type) = *self.get(function_data.body);
-        let body = self.export_compute_to_machine(
-            function_data.body,
-            poly_context,
-            module,
-            &mut move |b, pc, ut, m| {
-                for (binding, inst) in inputs_binding.iter() {
-                    if b == *binding && pc == poly_context {
-                        return inst.clone();
-                    }
-                }
-                bindings(b, pc, ut, m)
-            },
-        );
-        module.set_fn(
+        let output_type = self.machine_type(poly_context, body_type);
+        exporter.insert_fun(
             function_index,
-            backend::Fun {
-                inputs,
-                output_type: self.machine_type(poly_context, body_type),
-                body,
+            inputs_type,
+            output_type,
+            |exporter, inputs| {
+                let inputs: Vec<_> =
+                    Iterator::zip(inputs.iter().cloned(), inputs_binding.iter().copied()).collect();
+                self.export_compute_to_machine(
+                    function_data.body,
+                    poly_context,
+                    exporter,
+                    &mut |b, pc, ut, m| {
+                        for (inst, binding) in inputs.iter() {
+                            if b == *binding && pc == poly_context {
+                                return inst.clone();
+                            }
+                        }
+                        bindings(b, pc, ut, m)
+                    },
+                )
             },
-        );
+        )
     }
 }
 
@@ -1978,13 +2010,13 @@ fn main() {
 
     let mut machine = backend::Module::new();
     let mut bindings_map = HashMap::new();
-    let mut bindings = |b: Entity, pc: &PolyContext, ut, m: &mut backend::Module| {
+    let mut bindings = |b: Entity, pc: &PolyContext, ut, m: Exporter| {
         module.resolve_top_level_binding(pc, b, ut, m, &mut bindings_map)
     };
     module.export_mono_function_to_machine(
         backend::Module::MAIN,
         main.unwrap(),
-        &mut machine,
+        machine.writter(),
         &mut bindings,
     );
 

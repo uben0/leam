@@ -17,7 +17,6 @@ pub enum Type {
 
 #[derive(Debug)]
 pub struct Module {
-    counter: usize,
     functions: Vec<Fun>,
 }
 
@@ -30,17 +29,12 @@ pub struct Fun {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Inst {
-    ConstUnit,
-    ConstFn(usize),
-    ConstBool(bool),
-    ConstInt32(i32),
-    ConstNat32(u32),
-    ConstFloat32(f32),
+    Const(Value),
     Panic,
-    Push(Type, usize, Box<Self>, Box<Self>),
-    Pull(Type, usize),
-    Write(Type, Box<Self>),
-    Read(Type),
+    Assign(Type, usize, Box<Self>, Box<Self>),
+    Read(Type, usize),
+    Output(Type, Box<Self>),
+    Input(Type),
     Do(Vec<Self>, Box<Self>),
     Eq(Type, Box<Self>, Box<Self>),
     Branch(Type, Vec<(Self, Self)>, Box<Self>),
@@ -53,6 +47,24 @@ pub enum Inst {
     Div(Type, Box<Self>, Box<Self>),
     And(Vec<Self>),
     Or(Vec<Self>),
+}
+impl Inst {
+    pub fn and(mut insts: Vec<Inst>) -> Inst {
+        insts.retain(|inst| !matches!(inst, Inst::Const(Value::Bool(true))));
+        match insts.len() {
+            0 => Inst::Const(Value::Bool(true)),
+            1 => insts.pop().unwrap(),
+            _ => Inst::And(insts),
+        }
+    }
+    pub fn or(mut insts: Vec<Inst>) -> Inst {
+        insts.retain(|inst| !matches!(inst, Inst::Const(Value::Bool(false))));
+        match insts.len() {
+            0 => Inst::Const(Value::Bool(false)),
+            1 => insts.pop().unwrap(),
+            _ => Inst::And(insts),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -83,7 +95,7 @@ impl Value {
     }
 }
 impl Type {
-    fn read(self) -> Value {
+    fn input(self) -> Value {
         print!("{:?} > ", self);
         std::io::stdout().flush().unwrap();
         let mut buf = String::new();
@@ -108,7 +120,7 @@ impl Default for Fun {
         Fun {
             output_type: Type::Unit,
             inputs: Vec::new(),
-            body: Inst::ConstUnit,
+            body: Inst::Const(Value::Unit),
         }
     }
 }
@@ -129,7 +141,8 @@ impl Mem {
         };
         value.clone()
     }
-    fn push(&mut self, binding: usize, value: Value) {
+    fn write(&mut self, binding: usize, value: Value) {
+        // TODO: remove the push feature, replace it by function frame
         while self.bindings.get(binding).is_none() {
             self.bindings.push(Vec::new());
         }
@@ -145,48 +158,12 @@ impl Module {
 
     pub fn new() -> Self {
         Self {
-            counter: 0,
             functions: Vec::from([Fun::default()]),
         }
     }
 
-    pub fn insert_fun(
-        &mut self,
-        index: usize,
-        inputs_type: Vec<Type>,
-        output_type: Type,
-        body: impl Fn(ComputeWritter, &[Inst]) -> Inst,
-    ) {
-        let (inputs, bindings): (Vec<_>, Vec<_>) = inputs_type
-            .into_iter()
-            .enumerate()
-            .map(|(index, ttype)| ((ttype, index), Inst::Pull(ttype, index)))
-            .unzip();
-        self.functions[index] = Fun {
-            output_type,
-            inputs,
-            body: body(
-                ComputeWritter {
-                    counter: bindings.len(),
-                },
-                &bindings,
-            ),
-        };
-    }
-
-    pub fn reserve_fn(&mut self) -> usize {
-        let index = self.functions.len();
-        self.functions.push(Fun::default());
-        index
-    }
-
     pub fn set_fn(&mut self, index: usize, function: Fun) {
         *self.functions.get_mut(index).unwrap() = function;
-    }
-
-    pub fn new_id(&mut self) -> usize {
-        self.counter += 1;
-        self.counter
     }
 
     pub fn insert_fn(&mut self, fun: Fun) -> usize {
@@ -205,7 +182,7 @@ impl Module {
     fn run_fun(&self, fun: &Fun, inputs: Vec<Value>, mem: &mut Mem) -> Value {
         assert_eq!(inputs.len(), fun.inputs.len());
         for (input, (ttype, binding)) in Iterator::zip(inputs.into_iter(), fun.inputs.iter()) {
-            mem.push(*binding, input.assert_type(*ttype));
+            mem.write(*binding, input.assert_type(*ttype));
         }
         let output = self.run_inst(&fun.body, mem);
         for (_, binding) in &fun.inputs {
@@ -216,12 +193,7 @@ impl Module {
 
     fn run_inst(&self, inst: &Inst, mem: &mut Mem) -> Value {
         match inst {
-            Inst::ConstUnit => Value::Unit,
-            Inst::ConstInt32(value) => Value::Int32(*value),
-            Inst::ConstNat32(value) => Value::Nat32(*value),
-            Inst::ConstFloat32(value) => Value::Float32(*value),
-            Inst::ConstBool(value) => Value::Bool(*value),
-            Inst::ConstFn(function) => Value::Fn(*function),
+            Inst::Const(value) => value.clone(),
             Inst::Group(insts) => {
                 Value::Block(insts.iter().map(|inst| self.run_inst(inst, mem)).collect())
             }
@@ -235,16 +207,16 @@ impl Module {
                 value.clone().assert_type(*t)
             }
             Inst::Panic => panic!(),
-            Inst::Push(t, binding, head, tail) => {
+            Inst::Assign(t, binding, head, tail) => {
                 let head = self.run_inst(head, mem).assert_type(*t);
-                mem.push(*binding, head);
+                mem.write(*binding, head);
                 let tail = self.run_inst(tail, mem);
                 mem.pop(*binding);
                 tail
             }
-            Inst::Pull(t, binding) => mem.get(*binding).assert_type(*t),
-            Inst::Read(t) => t.read(),
-            Inst::Write(t, inst) => {
+            Inst::Read(t, binding) => mem.get(*binding).assert_type(*t),
+            Inst::Input(t) => t.input(),
+            Inst::Output(t, inst) => {
                 let value = self.run_inst(inst, mem).assert_type(*t);
                 println!("{:?}", value);
                 value
@@ -348,23 +320,104 @@ impl Module {
             }
         }
     }
+
+    pub fn writter(&mut self) -> Exporter {
+        Exporter {
+            counter: 0,
+            module: self,
+        }
+    }
 }
 
-pub struct ComputeWritter {
+pub struct Exporter<'a> {
     counter: usize,
+    module: &'a mut Module,
 }
-impl ComputeWritter {
-    pub fn push(self: Self, ttype: Type, head: Inst, tail: impl Fn(Self, Inst) -> Inst) -> Inst {
-        Inst::Push(
-            ttype,
-            self.counter,
-            Box::new(head),
-            Box::new(tail(
-                Self {
-                    counter: self.counter + 1,
+impl<'a> Exporter<'a> {
+    pub fn write(
+        &mut self,
+        ttype: Type,
+        head: Inst,
+        tail: impl FnOnce(Exporter, Inst) -> Inst,
+    ) -> Inst {
+        if let Inst::Read(p_type, _) = head {
+            assert_eq!(p_type, ttype);
+            tail(
+                Exporter {
+                    counter: self.counter,
+                    module: self.module,
                 },
-                Inst::Pull(ttype, self.counter),
-            )),
+                head,
+            )
+        } else {
+            Inst::Assign(
+                ttype,
+                self.counter,
+                Box::new(head),
+                Box::new(tail(
+                    Exporter {
+                        counter: self.counter + 1,
+                        module: self.module,
+                    },
+                    Inst::Read(ttype, self.counter),
+                )),
+            )
+        }
+    }
+    pub fn reserve_fn(&mut self) -> usize {
+        let index = self.module.functions.len();
+        self.module.functions.push(Fun::default());
+        index
+    }
+    pub fn insert_fun(
+        &mut self,
+        index: usize,
+        inputs_type: Vec<Type>,
+        output_type: Type,
+        mut body: impl FnMut(Exporter, Vec<Inst>) -> Inst,
+    ) -> Inst {
+        let (inputs, bindings): (Vec<_>, Vec<_>) = inputs_type
+            .into_iter()
+            .enumerate()
+            .map(|(index, ttype)| ((ttype, index), Inst::Read(ttype, index)))
+            .unzip();
+        self.module.functions[index] = Fun {
+            output_type,
+            inputs,
+            body: body(
+                Exporter {
+                    counter: bindings.len(),
+                    module: self.module,
+                },
+                bindings,
+            ),
+        };
+        Inst::Const(Value::Fn(index))
+    }
+
+    pub fn get(&mut self) -> Exporter {
+        Exporter {
+            counter: self.counter,
+            module: &mut self.module,
+        }
+    }
+
+    pub fn add(
+        &mut self,
+        ttype: Type,
+        mut lhs: impl FnMut(Exporter) -> Inst,
+        mut rhs: impl FnMut(Exporter) -> Inst,
+    ) -> Inst {
+        Inst::Add(
+            ttype,
+            Box::new(lhs(Exporter {
+                counter: 0,
+                module: self.module,
+            })),
+            Box::new(rhs(Exporter {
+                counter: 0,
+                module: self.module,
+            })),
         )
     }
 }
@@ -488,16 +541,31 @@ impl Writtable for &Fun {
     fn write<W: Write>(self, writter: Writter<W>) -> Writter<W> {
         writter
             .name("fn")
+            .param(self.output_type)
             .fold(self.inputs.iter(), |w, (input_type, input_binding)| {
                 w.param(*input_type).param(*input_binding)
             })
-            .param(self.output_type)
             .child(&self.body)
     }
 }
 impl Writtable for &Box<Inst> {
     fn write<W: Write>(self, writter: Writter<W>) -> Writter<W> {
         self.as_ref().write(writter)
+    }
+}
+impl Writtable for &Value {
+    fn write<W: Write>(self, w: Writter<W>) -> Writter<W> {
+        match self {
+            Value::Unit => w.name("const").param("unit"),
+            Value::Bool(value) => w.name("const").param("bool").param(*value),
+            Value::Int32(value) => w.name("const").param("i32").param(*value),
+            Value::Nat32(value) => w.name("const").param("u32").param(*value),
+            Value::Float32(value) => w.name("const").param("f32").param(*value),
+            Value::Fn(index) => w.name("const").param("fn").param(*index),
+            Value::Block(values) => w
+                .name("group")
+                .fold(values.iter(), |w, value| w.child(value)),
+        }
     }
 }
 impl Writtable for &Inst {
@@ -524,22 +592,16 @@ impl Writtable for &Inst {
                 .name("do")
                 .fold(insts, |w, inst| w.child(inst))
                 .child(tail),
-            Inst::Write(ttype, ref value) => w.name("write").param(ttype).child(value),
-            Inst::Read(ttype) => w.name("read").param(ttype),
-            Inst::Push(ttype, binding_id, ref head, ref tail) => w
-                .name("push")
+            Inst::Output(ttype, ref value) => w.name("output").param(ttype).child(value),
+            Inst::Input(ttype) => w.name("input").param(ttype),
+            Inst::Assign(ttype, binding_id, ref head, ref tail) => w
+                .name("assign")
                 .param(ttype)
                 .param(binding_id)
                 .child(head)
                 .child(tail),
-            Inst::Pull(ttype, binding_id) => w.name("pull").param(ttype).param(binding_id),
-            // TODO: use a single wrapper for const
-            Inst::ConstUnit => w.name("const").param(Type::Unit),
-            Inst::ConstFn(function) => w.name("const").param(Type::Fn).param(function),
-            Inst::ConstBool(value) => w.name("const").param(Type::Bool).param(value),
-            Inst::ConstInt32(value) => w.name("const").param(Type::Int32).param(value),
-            Inst::ConstNat32(value) => w.name("const").param(Type::Nat32).param(value),
-            Inst::ConstFloat32(value) => w.name("const").param(Type::Float32).param(value),
+            Inst::Read(ttype, binding_id) => w.name("read").param(ttype).param(binding_id),
+            Inst::Const(ref value) => value.write(w),
             Inst::Add(ttype, ref lhs, ref rhs) => w.name("add").param(ttype).child(lhs).child(rhs),
             Inst::Sub(ttype, ref lhs, ref rhs) => w.name("sub").param(ttype).child(lhs).child(rhs),
             Inst::Mul(ttype, ref lhs, ref rhs) => w.name("mul").param(ttype).child(lhs).child(rhs),

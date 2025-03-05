@@ -1,4 +1,4 @@
-use super::{Type, Inst, Module, Fun};
+use super::{Type, Inst, Module, Fun, Value};
 
 grammar;
 
@@ -12,7 +12,7 @@ pub Module: Module = "(" "module" <main:Fun> <funs:Fun*> ")" => {
 };
 
 Fun: Fun
-	= "(" "fn" <inputs:(Type Index)*> <output_type:Type> <body:Inst> ")"
+	= "(" "fn" <output_type:Type> <inputs:(Type Index)*> <body:Inst> ")"
 	=> Fun {
 		output_type,
 		inputs,
@@ -30,19 +30,19 @@ Type: Type = {
 }
 
 Inst: Inst = {
-	"(" "push" <t:Type> <b:Nat> <head:Inst> <tail:Inst> ")" => Inst::Push(t, b as usize, head.into(), tail.into()),
-	"(" "pull" <t:Type> <b:Nat> ")" => Inst::Pull(t, b as usize),
+	"(" "assign" <t:Type> <b:Nat> <head:Inst> <tail:Inst> ")" => Inst::Assign(t, b as usize, head.into(), tail.into()),
+	"(" "read" <t:Type> <b:Nat> ")" => Inst::Read(t, b as usize),
 	"(" "do" <insts:Inst*> <tail:Inst> ")" => Inst::Do(insts, tail.into()),
-	"(" "write" <t:Type> <i:Inst> ")" => Inst::Write(t, i.into()),
-	"(" "read" <t:Type> ")" => Inst::Read(t),
+	"(" "output" <t:Type> <i:Inst> ")" => Inst::Output(t, i.into()),
+	"(" "input" <t:Type> ")" => Inst::Input(t),
 	"(" "eq" <t:Type> <lhs:Inst> <rhs:Inst> ")" => Inst::Eq(t, lhs.into(), rhs.into()),
-	"(" "const" "i32" <v:Int> ")" => Inst::ConstInt32(v as i32),
-	"(" "const" "u32" <v:Nat> ")" => Inst::ConstNat32(v as u32),
-	"(" "const" "f32" <v:Float> ")" => Inst::ConstFloat32(v as f32),
-	"(" "const" "f32" <v:Int> ")" => Inst::ConstFloat32(v as f32),
-	"(" "const" "bool" <v:Bool> ")" => Inst::ConstBool(v),
-	"(" "const" "fn" <v:Index> ")" => Inst::ConstFn(v),
-	"(" "const" "unit" ")" => Inst::ConstUnit,
+	"(" "const" "i32" <v:Int> ")" => Inst::Const(Value::Int32(v as i32)),
+	"(" "const" "u32" <v:Nat> ")" => Inst::Const(Value::Nat32(v as u32)),
+	"(" "const" "f32" <v:Float> ")" => Inst::Const(Value::Float32(v as f32)),
+	"(" "const" "f32" <v:Int> ")" => Inst::Const(Value::Float32(v as f32)),
+	"(" "const" "bool" <v:Bool> ")" => Inst::Const(Value::Bool(v)),
+	"(" "const" "fn" <v:Index> ")" => Inst::Const(Value::Fn(v)),
+	"(" "const" "unit" ")" => Inst::Const(Value::Unit),
 	"(" "panic" ")" => Inst::Panic,
 	"(" "branch" <t:Type> <b:(<Inst> <Inst>)*> <d:Inst> ")" => Inst::Branch(t, b, d.into()),
 	"(" "call" <f:Inst> <i:Inst*> ")" => Inst::Call(f.into(), i),
