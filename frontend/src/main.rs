@@ -1,10 +1,12 @@
 use backend::{Exporter, Inst, Value, Writtable};
 use bevy_ecs::prelude::*;
+use clap::Parser;
 use std::{
     collections::{HashMap, hash_map::Entry},
     fmt::Display,
     hash::Hash,
     ops::Index,
+    path::PathBuf,
     rc::Rc,
 };
 lalrpop_util::lalrpop_mod!(grammar);
@@ -1908,8 +1910,14 @@ impl Module {
     }
 }
 
+#[derive(Parser)]
+struct Args {
+    input: PathBuf,
+}
+
 fn main() {
-    let content = std::fs::read_to_string("input.leam").unwrap();
+    let Args { input } = Args::parse();
+    let content = std::fs::read_to_string(input).unwrap();
     let content = content.as_str();
     let mut module = Module::new(content);
     let parser = grammar::ModuleParser::new();

@@ -3,6 +3,7 @@ use std::{io::Write, rc::Rc};
 lalrpop_util::lalrpop_mod!(grammar);
 
 pub use grammar::ModuleParser as Parser;
+use slab::Slab;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Type {
@@ -13,6 +14,7 @@ pub enum Type {
     Float32,
     Fn,
     Block,
+    Ptr,
 }
 
 #[derive(Debug)]
@@ -47,6 +49,9 @@ pub enum Inst {
     Div(Type, Box<Self>, Box<Self>),
     And(Vec<Self>),
     Or(Vec<Self>),
+    Alloca(Box<Self>),
+    Deref(Box<Self>),
+    Free(Box<Self>),
 }
 impl Inst {
     pub fn and(mut insts: Vec<Inst>) -> Inst {
@@ -62,7 +67,7 @@ impl Inst {
         match insts.len() {
             0 => Inst::Const(Value::Bool(false)),
             1 => insts.pop().unwrap(),
-            _ => Inst::And(insts),
+            _ => Inst::Or(insts),
         }
     }
 }
@@ -76,6 +81,12 @@ pub enum Value {
     Float32(f32),
     Fn(usize),
     Block(Rc<[Self]>),
+    Ptr(usize),
+}
+pub enum Ptr {
+    Frame(usize),
+    Heap(usize),
+    Extract(usize, Box<Self>),
 }
 impl Value {
     fn get_type(&self) -> Type {
@@ -87,6 +98,7 @@ impl Value {
             Value::Float32(_) => Type::Float32,
             Value::Fn(_) => Type::Fn,
             Value::Block(_) => Type::Block,
+            Value::Ptr(_) => Type::Ptr,
         }
     }
     fn assert_type(self, ttype: Type) -> Self {
@@ -112,6 +124,7 @@ impl Type {
             Type::Float32 => Value::Float32(s.parse().unwrap()),
             Type::Block => unimplemented!(),
             Type::Fn => unimplemented!(),
+            Type::Ptr => unimplemented!(),
         }
     }
 }
@@ -128,11 +141,13 @@ impl Default for Fun {
 #[derive(Debug, Clone)]
 struct Mem {
     bindings: Vec<Vec<Value>>,
+    allocated: Slab<Value>,
 }
 impl Mem {
     fn new() -> Self {
         Self {
             bindings: Vec::new(),
+            allocated: Slab::new(),
         }
     }
     fn get(&self, binding: usize) -> Value {
@@ -150,6 +165,25 @@ impl Mem {
     }
     fn pop(&mut self, binding: usize) {
         self.bindings[binding].pop().unwrap();
+    }
+
+    fn allocate(&mut self, value: Value) -> Value {
+        Value::Ptr(self.allocated.insert(value))
+    }
+    fn deref(&self, address: Value) -> Value {
+        let Value::Ptr(address) = address else {
+            panic!("only ptr can be derefed")
+        };
+        self.allocated
+            .get(address)
+            .expect("unallocated segment")
+            .clone()
+    }
+    fn free(&mut self, address: Value) {
+        let Value::Ptr(address) = address else {
+            panic!("only ptr can be derefed")
+        };
+        self.allocated.remove(address);
     }
 }
 
@@ -193,6 +227,19 @@ impl Module {
 
     fn run_inst(&self, inst: &Inst, mem: &mut Mem) -> Value {
         match inst {
+            Inst::Alloca(inst) => {
+                let value = self.run_inst(inst, mem);
+                mem.allocate(value)
+            }
+            Inst::Deref(ptr) => {
+                let address = self.run_inst(ptr, mem);
+                mem.deref(address)
+            }
+            Inst::Free(ptr) => {
+                let address = self.run_inst(ptr, mem);
+                mem.free(address);
+                Value::Unit
+            }
             Inst::Const(value) => value.clone(),
             Inst::Group(insts) => {
                 Value::Block(insts.iter().map(|inst| self.run_inst(inst, mem)).collect())
@@ -534,6 +581,7 @@ impl Writtable for Type {
             Self::Int32 => w.label("i32"),
             Self::Nat32 => w.label("u32"),
             Self::Float32 => w.label("f32"),
+            Self::Ptr => w.label("ptr"),
         }
     }
 }
@@ -555,13 +603,15 @@ impl Writtable for &Box<Inst> {
 }
 impl Writtable for &Value {
     fn write<W: Write>(self, w: Writter<W>) -> Writter<W> {
+        let ttype = self.get_type();
         match self {
-            Value::Unit => w.name("const").param("unit"),
-            Value::Bool(value) => w.name("const").param("bool").param(*value),
-            Value::Int32(value) => w.name("const").param("i32").param(*value),
-            Value::Nat32(value) => w.name("const").param("u32").param(*value),
-            Value::Float32(value) => w.name("const").param("f32").param(*value),
-            Value::Fn(index) => w.name("const").param("fn").param(*index),
+            Value::Unit => w.name("const").param(ttype),
+            Value::Bool(value) => w.name("const").param(ttype).param(*value),
+            Value::Int32(value) => w.name("const").param(ttype).param(*value),
+            Value::Nat32(value) => w.name("const").param(ttype).param(*value),
+            Value::Float32(value) => w.name("const").param(ttype).param(*value),
+            Value::Fn(index) => w.name("const").param(ttype).param(*index),
+            Value::Ptr(value) => w.name("const").param(ttype).param(*value),
             Value::Block(values) => w
                 .name("group")
                 .fold(values.iter(), |w, value| w.child(value)),
@@ -571,6 +621,9 @@ impl Writtable for &Value {
 impl Writtable for &Inst {
     fn write<W: Write>(self, w: Writter<W>) -> Writter<W> {
         match *self {
+            Inst::Alloca(ref value) => w.name("alloca").child(value),
+            Inst::Deref(ref value) => w.name("deref").child(value),
+            Inst::Free(ref value) => w.name("free").child(value),
             Inst::Or(ref bools) => w.name("or").fold(bools, |w, cond| w.child(cond)),
             Inst::And(ref bools) => w.name("and").fold(bools, |w, cond| w.child(cond)),
             Inst::Group(ref values) => w.name("group").fold(values, |w, value| w.child(value)),

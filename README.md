@@ -4,25 +4,80 @@ A statically typed, functional programming language inspired by the Gleam lanuga
 
 ```gleam
 type List(a) {
-  Head(a, List(a))
-  Tail()
+  Node(a, List(a))
+  Leaf()
 }
 
 fn main() {
-  let list = Head(4, Head(0, Tail()))
+  let list = Node(4, Node(0, Leaf()))
   print_list(list)
 }
 
 fn print_list(list: List(a)) {
   case list {
-    Head(elem, tail) -> {
+    Node(elem, tail) -> {
       write elem
       print_list(tail)
     }
-    Tail() -> {}
+    Leaf() -> {}
   }
 }
 ```
+
+Some logs during compilation gives good insights on what is happening:
+
+```
+exporting main[] at index 0
+inferring poly params
+  - poly type fn('0, List('0)) -> List('0)
+  - usage type fn(Int, List(Int)) -> List(Int)
+exporting Node[Int32] at index 1
+inferring poly params
+  - poly type fn('0, List('0)) -> List('0)
+  - usage type fn(Int, List(Int)) -> List(Int)
+inferring poly params
+  - poly type fn() -> List('0)
+  - usage type fn() -> List(Int)
+exporting Leaf[Int32] at index 2
+inferring poly params
+  - poly type fn(List('0)) -> Nil
+  - usage type fn(List(Int)) -> Nil
+exporting print_list[Int32] at index 3
+inferring poly params
+  - poly type fn(List('0)) -> Nil
+  - usage type fn(List('0)) -> Nil
+```
+
+## Backend
+
+The backend is a low level representation of the program.
+
+A module contains functions. A function is identified by its index (position in the list).
+
+The following data types are available:
+- [x] `i32`
+- [x] `u32`
+- [x] `f32`
+- [x] `unit` the void value
+- [x] `fn` a function index
+- [x] `block` an opaque value
+    - [ ] will have a size
+    - [ ] and an alignment
+
+The following instructions are available:
+- [x] `const` provides a hard written value
+- [x] `assign` and `read` assigns then reads a value to and from a memory cell
+    - [x] functions take an arbitrary list of parameters assigned to memory cells
+    - [ ] a `write` instruction mutates the stored value (will add a flag to `assign`, either `static` or `volatile` to disallow or allow mutation)
+- [x] `call` invokes a function with the provided parameters
+- [x] `input` and `output` reads and writes value to stdin and stdout
+- [x] `add`, `sub`, `mul`, `div` and `eq` are the usual binary operators
+- [x] `and` and `or` are the boolean operators with arbitrary number of operands, currently they are lazy and will shortcircuit
+    - [ ] add a flag to control wether to be lazy or greedy
+- [x] `branch` is currently the only control flow available
+    - execute the first branch with a positive predicate
+    - has a last default branch in case non of the above were positive
+- [x] `panic` does what it says
 
 The above code compiles to:
 
@@ -71,48 +126,18 @@ The above code compiles to:
             (panic))))
 ```
 
-A `module` is a list of functions, identified by their position in the list. The first function is always the main function.
-
-Values can be assigned to memory cells. A memory cell is identified by an index.
-
-Functions assign each of their inputs to a cell. A cell can be assigned with the `assign` instruction.
-
-A value from a memory cell can be read with `read`.
-
-The `input` and `output` instruction will read and write a value from the standard input and from the standard output.
-
-Values can be grouped with `group` and retreived from a group with `extract`. This is usefull for compound types.
-
-Some logs during compilation gives good insights on what is happening:
-
-```
-STAGE EXPORTING
-exporting main[] at index 0
-inferring poly params
-  - poly type fn('0, List('0)) -> List('0)
-  - usage type fn(Int, List(Int)) -> List(Int)
-exporting Head[Int32] at index 1
-inferring poly params
-  - poly type fn('0, List('0)) -> List('0)
-  - usage type fn(Int, List(Int)) -> List(Int)
-inferring poly params
-  - poly type fn() -> List('0)
-  - usage type fn() -> List(Int)
-exporting Tail[Int32] at index 2
-inferring poly params
-  - poly type fn(List('0)) -> Nil
-  - usage type fn(List(Int)) -> Nil
-exporting print_list[Int32] at index 3
-inferring poly params
-  - poly type fn(List('0)) -> Nil
-  - usage type fn(List('0)) -> Nil
-```
-
 # ROADMAP
 
 - frontend
   - [ ] polymorphic let
+  - [ ] embeded polymorphism
+  - [ ] lifetime and reference counting
+  - [ ] determine size of types
+  - [ ] extend builtin types
+    - [ ] list
+    - [ ] string
 
 - backend
   - [ ] alloc, ptr, free
   - [ ] block sized
+  - [ ] emit LLVM IR
