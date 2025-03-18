@@ -5,7 +5,7 @@ lalrpop_util::lalrpop_mod!(grammar);
 pub use grammar::ModuleParser as Parser;
 use slab::Slab;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Type {
     Unit,
     Bool,
@@ -14,6 +14,8 @@ pub enum Type {
     Float32,
     Fn,
     Block,
+    Prod(Vec<Type>),
+    Sum(Vec<Type>),
     Ptr,
 }
 
@@ -80,8 +82,9 @@ pub enum Value {
     Nat32(u32),
     Float32(f32),
     Fn(usize),
-    Block(Rc<[Self]>),
+    // Block(Rc<[Self]>),
     Ptr(usize),
+    Prod(Rc<[Self]>),
 }
 pub enum Ptr {
     Frame(usize),
@@ -97,24 +100,28 @@ impl Value {
             Value::Nat32(_) => Type::Nat32,
             Value::Float32(_) => Type::Float32,
             Value::Fn(_) => Type::Fn,
-            Value::Block(_) => Type::Block,
+            // Value::Block(_) => Type::Block,
             Value::Ptr(_) => Type::Ptr,
+            Value::Prod(values) => {
+                // Type::Prod(values.iter().map(|value| value.get_type()).collect())
+                Type::Block
+            }
         }
     }
-    fn assert_type(self, ttype: Type) -> Self {
-        assert_eq!(ttype, self.get_type());
+    fn assert_type(self, ttype: &Type) -> Self {
+        assert_eq!(ttype, &self.get_type());
         self
     }
 }
 impl Type {
-    fn input(self) -> Value {
+    fn input(&self) -> Value {
         print!("{:?} > ", self);
         std::io::stdout().flush().unwrap();
         let mut buf = String::new();
         std::io::stdin().read_line(&mut buf).unwrap();
         self.parse(&buf)
     }
-    fn parse(self, s: &str) -> Value {
+    fn parse(&self, s: &str) -> Value {
         let s = s.trim();
         match self {
             Type::Unit => Value::Unit,
@@ -125,6 +132,8 @@ impl Type {
             Type::Block => unimplemented!(),
             Type::Fn => unimplemented!(),
             Type::Ptr => unimplemented!(),
+            Type::Prod(_) => unimplemented!(),
+            Type::Sum(_) => unimplemented!(),
         }
     }
 }
@@ -216,13 +225,13 @@ impl Module {
     fn run_fun(&self, fun: &Fun, inputs: Vec<Value>, mem: &mut Mem) -> Value {
         assert_eq!(inputs.len(), fun.inputs.len());
         for (input, (ttype, binding)) in Iterator::zip(inputs.into_iter(), fun.inputs.iter()) {
-            mem.write(*binding, input.assert_type(*ttype));
+            mem.write(*binding, input.assert_type(ttype));
         }
         let output = self.run_inst(&fun.body, mem);
         for (_, binding) in &fun.inputs {
             mem.pop(*binding);
         }
-        output.assert_type(fun.output_type)
+        output.assert_type(&fun.output_type)
     }
 
     fn run_inst(&self, inst: &Inst, mem: &mut Mem) -> Value {
@@ -242,29 +251,29 @@ impl Module {
             }
             Inst::Const(value) => value.clone(),
             Inst::Group(insts) => {
-                Value::Block(insts.iter().map(|inst| self.run_inst(inst, mem)).collect())
+                Value::Prod(insts.iter().map(|inst| self.run_inst(inst, mem)).collect())
             }
             Inst::Extract(t, index, value) => {
-                let Value::Block(values) = self.run_inst(value, mem) else {
-                    panic!("extract only valid on opaque")
+                let Value::Prod(values) = self.run_inst(value, mem) else {
+                    panic!("extract only valid on grouped values")
                 };
                 let Some(value) = values.get(*index) else {
                     panic!("extract out of bound");
                 };
-                value.clone().assert_type(*t)
+                value.clone().assert_type(t)
             }
             Inst::Panic => panic!(),
             Inst::Assign(t, binding, head, tail) => {
-                let head = self.run_inst(head, mem).assert_type(*t);
+                let head = self.run_inst(head, mem).assert_type(t);
                 mem.write(*binding, head);
                 let tail = self.run_inst(tail, mem);
                 mem.pop(*binding);
                 tail
             }
-            Inst::Read(t, binding) => mem.get(*binding).assert_type(*t),
+            Inst::Read(t, binding) => mem.get(*binding).assert_type(t),
             Inst::Input(t) => t.input(),
             Inst::Output(t, inst) => {
-                let value = self.run_inst(inst, mem).assert_type(*t);
+                let value = self.run_inst(inst, mem).assert_type(t);
                 println!("{:?}", value);
                 value
             }
@@ -354,7 +363,7 @@ impl Module {
                     cond.then(|| self.run_inst(value, mem))
                 })
                 .unwrap_or_else(|| self.run_inst(default, mem))
-                .assert_type(*t),
+                .assert_type(t),
             Inst::Call(function, inputs) => {
                 let Value::Fn(function) = self.run_inst(function, mem) else {
                     panic!("only a function can be called");
@@ -383,11 +392,11 @@ pub struct Exporter<'a> {
 impl<'a> Exporter<'a> {
     pub fn write(
         &mut self,
-        ttype: Type,
+        ttype: &Type,
         head: Inst,
         tail: impl FnOnce(Exporter, Inst) -> Inst,
     ) -> Inst {
-        if let Inst::Read(p_type, _) = head {
+        if let Inst::Read(p_type, _) = &head {
             assert_eq!(p_type, ttype);
             tail(
                 Exporter {
@@ -398,7 +407,7 @@ impl<'a> Exporter<'a> {
             )
         } else {
             Inst::Assign(
-                ttype,
+                ttype.clone(),
                 self.counter,
                 Box::new(head),
                 Box::new(tail(
@@ -406,7 +415,7 @@ impl<'a> Exporter<'a> {
                         counter: self.counter + 1,
                         module: self.module,
                     },
-                    Inst::Read(ttype, self.counter),
+                    Inst::Read(ttype.clone(), self.counter),
                 )),
             )
         }
@@ -426,7 +435,7 @@ impl<'a> Exporter<'a> {
         let (inputs, bindings): (Vec<_>, Vec<_>) = inputs_type
             .into_iter()
             .enumerate()
-            .map(|(index, ttype)| ((ttype, index), Inst::Read(ttype, index)))
+            .map(|(index, ttype)| ((ttype.clone(), index), Inst::Read(ttype, index)))
             .unzip();
         self.module.functions[index] = Fun {
             output_type,
@@ -474,19 +483,22 @@ pub struct Writter<W: Write> {
     writter: W,
     indent: usize,
 }
+// TODO: use writter for zig expressions
+// pub struct ZigWritter<W: Write> {
+//     color: bool,
+//     writter: W,
+//     indent: usize,
+// }
 impl<W: Write> Writter<W> {
     const NAME: &str = "\x1b[94m";
     const LABEL: &str = "\x1b[95m";
     const RESET: &str = "\x1b[0m";
     pub fn root(writter: W, root: impl Fn(Self) -> Self, color: bool) {
-        let mut it = Self {
+        root(Self {
             writter,
             indent: 0,
             color,
-        };
-        write!(it.writter, "(").unwrap();
-        it = root(it);
-        writeln!(it.writter, ")").unwrap();
+        });
     }
     fn param(mut self, param: impl Writtable) -> Self {
         write!(self.writter, " ").unwrap();
@@ -500,23 +512,22 @@ impl<W: Write> Writter<W> {
         }
         self
     }
-    fn name(mut self, name: &str) -> Self {
+    fn line(mut self) -> Self {
+        writeln!(self.writter).unwrap();
+        for _ in 0..self.indent {
+            write!(self.writter, "    ").unwrap();
+        }
+        self
+    }
+    fn node(mut self, name: &str, inside: impl Fn(Self) -> Self) -> Self {
+        self.indent += 1;
+        write!(self.writter, "(").unwrap();
         if self.color {
             write!(self.writter, "{}{}{}", Self::NAME, name, Self::RESET).unwrap();
         } else {
             write!(self.writter, "{}", name).unwrap();
         }
-        self
-    }
-
-    fn child(mut self, child: impl Writtable) -> Self {
-        self.indent += 1;
-        writeln!(self.writter).unwrap();
-        for _ in 0..self.indent {
-            write!(self.writter, "    ").unwrap();
-        }
-        write!(self.writter, "(").unwrap();
-        self = child.write(self);
+        self = inside(self);
         write!(self.writter, ")").unwrap();
         self.indent -= 1;
         self
@@ -567,33 +578,37 @@ impl Writtable for &str {
 }
 impl Writtable for &Module {
     fn write<W: Write>(self, w: Writter<W>) -> Writter<W> {
-        w.name("module")
-            .fold(&self.functions, |w, fun| w.child(fun))
+        w.node("module", |w| {
+            w.fold(&self.functions, |w, fun| w.line().param(fun))
+        })
     }
 }
-impl Writtable for Type {
+impl Writtable for &Type {
     fn write<W: Write>(self, w: Writter<W>) -> Writter<W> {
         match self {
-            Self::Unit => w.label("unit"),
-            Self::Block => w.label("block"),
-            Self::Bool => w.label("bool"),
-            Self::Fn => w.label("fn"),
-            Self::Int32 => w.label("i32"),
-            Self::Nat32 => w.label("u32"),
-            Self::Float32 => w.label("f32"),
-            Self::Ptr => w.label("ptr"),
+            Type::Unit => w.label("unit"),
+            Type::Block => w.label("block"),
+            Type::Bool => w.label("bool"),
+            Type::Fn => w.label("fn"),
+            Type::Int32 => w.label("i32"),
+            Type::Nat32 => w.label("u32"),
+            Type::Float32 => w.label("f32"),
+            Type::Ptr => w.label("ptr"),
+            Type::Prod(ttype) => w.node("prod", |w| w.fold(ttype, |w, param| w.param(param))),
+            Type::Sum(ttype) => w.node("sum", |w| w.fold(ttype, |w, param| w.param(param))),
         }
     }
 }
 impl Writtable for &Fun {
     fn write<W: Write>(self, writter: Writter<W>) -> Writter<W> {
-        writter
-            .name("fn")
-            .param(self.output_type)
-            .fold(self.inputs.iter(), |w, (input_type, input_binding)| {
-                w.param(*input_type).param(*input_binding)
-            })
-            .child(&self.body)
+        writter.node("fn", |w| {
+            w.param(&self.output_type)
+                .fold(self.inputs.iter(), |w, (input_type, input_binding)| {
+                    w.param(input_type).param(*input_binding)
+                })
+                .line()
+                .param(&self.body)
+        })
     }
 }
 impl Writtable for &Box<Inst> {
@@ -603,62 +618,86 @@ impl Writtable for &Box<Inst> {
 }
 impl Writtable for &Value {
     fn write<W: Write>(self, w: Writter<W>) -> Writter<W> {
-        let ttype = self.get_type();
+        let ttype = &self.get_type();
         match self {
-            Value::Unit => w.name("const").param(ttype),
-            Value::Bool(value) => w.name("const").param(ttype).param(*value),
-            Value::Int32(value) => w.name("const").param(ttype).param(*value),
-            Value::Nat32(value) => w.name("const").param(ttype).param(*value),
-            Value::Float32(value) => w.name("const").param(ttype).param(*value),
-            Value::Fn(index) => w.name("const").param(ttype).param(*index),
-            Value::Ptr(value) => w.name("const").param(ttype).param(*value),
-            Value::Block(values) => w
-                .name("group")
-                .fold(values.iter(), |w, value| w.child(value)),
+            Value::Unit => w.node("const", |w| w.param(ttype)),
+            Value::Bool(value) => w.node("const", |w| w.param(ttype).param(*value)),
+            Value::Int32(value) => w.node("const", |w| w.param(ttype).param(*value)),
+            Value::Nat32(value) => w.node("const", |w| w.param(ttype).param(*value)),
+            Value::Float32(value) => w.node("const", |w| w.param(ttype).param(*value)),
+            Value::Fn(index) => w.node("const", |w| w.param(ttype).param(*index)),
+            Value::Ptr(value) => w.node("const", |w| w.param(ttype).param(*value)),
+            Value::Prod(values) => w.node("group", |w| {
+                w.fold(values.iter(), |w, value| w.line().param(value))
+            }),
         }
     }
 }
 impl Writtable for &Inst {
     fn write<W: Write>(self, w: Writter<W>) -> Writter<W> {
+        // TODO: change to ref match
         match *self {
-            Inst::Alloca(ref value) => w.name("alloca").child(value),
-            Inst::Deref(ref value) => w.name("deref").child(value),
-            Inst::Free(ref value) => w.name("free").child(value),
-            Inst::Or(ref bools) => w.name("or").fold(bools, |w, cond| w.child(cond)),
-            Inst::And(ref bools) => w.name("and").fold(bools, |w, cond| w.child(cond)),
-            Inst::Group(ref values) => w.name("group").fold(values, |w, value| w.child(value)),
-            Inst::Extract(t, index, ref block) => {
-                w.name("extract").param(t).param(index).child(block)
+            Inst::Alloca(ref value) => w.node("alloca", |w| w.param(value)),
+            Inst::Deref(ref value) => w.node("deref", |w| w.param(value)),
+            Inst::Free(ref value) => w.node("free", |w| w.param(value)),
+            Inst::Or(ref bools) => w.node("or", |w| w.fold(bools, |w, cond| w.line().param(cond))),
+            Inst::And(ref bools) => {
+                w.node("and", |w| w.fold(bools, |w, cond| w.line().param(cond)))
             }
-            Inst::Call(ref fun, ref params) => w
-                .name("call")
-                .child(fun)
-                .fold(params, |w, param| w.child(param)),
-            Inst::Panic => w.name("panic"),
-            Inst::Eq(t, ref lhs, ref rhs) => w.name("eq").param(t).child(lhs).child(rhs),
-            Inst::Branch(t, ref then, ref or) => w
-                .name("branch")
-                .param(t)
-                .fold(then.iter(), |w, (c, v)| w.child(c).child(v))
-                .child(or),
-            Inst::Do(ref insts, ref tail) => w
-                .name("do")
-                .fold(insts, |w, inst| w.child(inst))
-                .child(tail),
-            Inst::Output(ttype, ref value) => w.name("output").param(ttype).child(value),
-            Inst::Input(ttype) => w.name("input").param(ttype),
-            Inst::Assign(ttype, binding_id, ref head, ref tail) => w
-                .name("assign")
-                .param(ttype)
-                .param(binding_id)
-                .child(head)
-                .child(tail),
-            Inst::Read(ttype, binding_id) => w.name("read").param(ttype).param(binding_id),
+            Inst::Group(ref values) => w.node("group", |w| {
+                w.fold(values, |w, value| w.line().param(value))
+            }),
+            Inst::Extract(ref t, index, ref block) => {
+                w.node("extract", |w| w.param(t).param(index).line().param(block))
+            }
+            Inst::Call(ref fun, ref params) => w.node("call", |w| {
+                w.line()
+                    .param(fun)
+                    .fold(params, |w, param| w.line().param(param))
+            }),
+            Inst::Panic => w.node("panic", |w| w),
+            Inst::Eq(ref t, ref lhs, ref rhs) => {
+                w.node("eq", |w| w.param(t).line().param(lhs).line().param(rhs))
+            }
+            Inst::Branch(ref t, ref then, ref or) => w.node("branch", |w| {
+                w.param(t)
+                    .fold(then.iter(), |w, (c, v)| w.line().param(c).line().param(v))
+                    .line()
+                    .param(or)
+            }),
+            Inst::Do(ref insts, ref tail) => w.node("do", |w| {
+                w.fold(insts, |w, inst| w.line().param(inst))
+                    .line()
+                    .param(tail)
+            }),
+            Inst::Output(ref ttype, ref value) => {
+                w.node("output", |w| w.param(ttype).line().param(value))
+            }
+            Inst::Input(ref ttype) => w.node("input", |w| w.param(ttype)),
+            Inst::Assign(ref ttype, binding_id, ref head, ref tail) => w.node("assign", |w| {
+                w.param(ttype)
+                    .param(binding_id)
+                    .line()
+                    .param(head)
+                    .line()
+                    .param(tail)
+            }),
+            Inst::Read(ref ttype, binding_id) => {
+                w.node("read", |w| w.param(ttype).param(binding_id))
+            }
             Inst::Const(ref value) => value.write(w),
-            Inst::Add(ttype, ref lhs, ref rhs) => w.name("add").param(ttype).child(lhs).child(rhs),
-            Inst::Sub(ttype, ref lhs, ref rhs) => w.name("sub").param(ttype).child(lhs).child(rhs),
-            Inst::Mul(ttype, ref lhs, ref rhs) => w.name("mul").param(ttype).child(lhs).child(rhs),
-            Inst::Div(ttype, ref lhs, ref rhs) => w.name("div").param(ttype).child(lhs).child(rhs),
+            Inst::Add(ref ttype, ref lhs, ref rhs) => w.node("add", |w| {
+                w.param(ttype).line().param(lhs).line().param(rhs)
+            }),
+            Inst::Sub(ref ttype, ref lhs, ref rhs) => w.node("sub", |w| {
+                w.param(ttype).line().param(lhs).line().param(rhs)
+            }),
+            Inst::Mul(ref ttype, ref lhs, ref rhs) => w.node("mul", |w| {
+                w.param(ttype).line().param(lhs).line().param(rhs)
+            }),
+            Inst::Div(ref ttype, ref lhs, ref rhs) => w.node("div", |w| {
+                w.param(ttype).line().param(lhs).line().param(rhs)
+            }),
         }
     }
 }

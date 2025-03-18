@@ -26,7 +26,8 @@ Type: Type = {
 	"u32" => Type::Nat32,
 	"f32" => Type::Float32,
 	"fn" => Type::Fn,
-	"block" => Type::Block,
+	"(" "prod" <t:Type*> ")" => Type::Prod(t),
+	"(" "sum" <t:Type*> ")" => Type::Sum(t),
 }
 
 Inst: Inst = {

@@ -1336,7 +1336,7 @@ impl Module {
             TypeState::Unknown => backend::Type::Unit,
             TypeState::Parameter { index, poly } => {
                 assert_eq!(poly, poly_context.poly_type);
-                poly_context.params[index]
+                poly_context.params[index].clone()
             }
             TypeState::App(term, ref params) => match (term, params.as_slice()) {
                 (TypeTerm::Int, []) => backend::Type::Int32,
@@ -1344,7 +1344,29 @@ impl Module {
                 (TypeTerm::Bool, []) => backend::Type::Bool,
                 (TypeTerm::Fn, [.., _]) => backend::Type::Fn,
                 (TypeTerm::Nil, []) => backend::Type::Unit,
-                (TypeTerm::Def(_), [..]) => backend::Type::Block,
+                (TypeTerm::Def(type_def), params) => {
+                    // let mut variants = Vec::new();
+                    // for variant in &self.get::<TypeDef>(type_def).variants {
+                    //     let HasType(fn_type) = *self.get(variant.binding);
+                    //     let (inputs, _) = self.extract_fn_type(fn_type);
+                    //     let params = params
+                    //         .iter()
+                    //         .map(|param| self.machine_type(poly_context, *param))
+                    //         .collect();
+                    //     let poly_context = PolyContext::new(&self.world, fn_type, params);
+                    //     variants.push(backend::Type::Prod(
+                    //         inputs
+                    //             .iter()
+                    //             .map(|input| self.machine_type(&poly_context, *input))
+                    //             .collect(),
+                    //     ));
+                    // }
+                    // backend::Type::Prod(Vec::from([
+                    //     backend::Type::Nat32,
+                    //     backend::Type::Sum(variants),
+                    // ]))
+                    backend::Type::Block
+                }
                 t => panic!("non exportable type {:?}", t),
             },
         }
@@ -1385,7 +1407,7 @@ impl Module {
                     matchers.push(self.export_pattern_match_to_machine(
                         field_pattern,
                         poly_context,
-                        Inst::Extract(ttype, index + 1, Box::new(on.clone())),
+                        Inst::Extract(ttype.clone(), index + 1, Box::new(on.clone())),
                         ttype,
                     ));
                 }
@@ -1720,7 +1742,7 @@ impl Module {
                 let binding_type = self.machine_type(poly_context, binding_type);
                 let head =
                     self.export_compute_to_machine(head, poly_context, exporter.get(), bindings);
-                exporter.write(binding_type, head, |exporter, head| {
+                exporter.write(&binding_type, head, |exporter, head| {
                     self.export_compute_to_machine(
                         tail,
                         &poly_context,
@@ -1769,7 +1791,7 @@ impl Module {
                 let ttype = self.machine_type(poly_context, ttype);
                 let head =
                     self.export_compute_to_machine(on, poly_context, exporter.get(), bindings);
-                exporter.write(on_type, head, |mut w, on| {
+                exporter.write(&on_type, head, |mut w, on| {
                     let mut thens: Vec<(Inst, Inst)> = Vec::new();
                     for (pattern, value) in branches.clone() {
                         let mut export_pattern_bind_to_machine = self
@@ -1785,7 +1807,7 @@ impl Module {
                                 pattern,
                                 poly_context,
                                 on.clone(),
-                                on_type,
+                                on_type.clone(),
                             ),
                             self.export_compute_to_machine(
                                 value,
@@ -2021,6 +2043,8 @@ fn main() {
     let mut bindings = |b: Entity, pc: &PolyContext, ut, m: Exporter| {
         module.resolve_top_level_binding(pc, b, ut, m, &mut bindings_map)
     };
+    // let mut types_map = HashMap::new();
+    // let mut types = |
     module.export_mono_function_to_machine(
         backend::Module::MAIN,
         main.unwrap(),
