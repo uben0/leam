@@ -22,6 +22,9 @@ const PURPLE: &str = "\x1b[95m";
 
 // TODO: make all component cheaply clonable with Rc
 
+/// A text span in the input file
+///
+/// Instead of storing strings, it cheaply delimit with two cursor the desired text
 #[derive(Component, Debug, Clone, Copy)]
 pub struct Span(usize, usize);
 
@@ -35,11 +38,24 @@ impl Index<Span> for str {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CompileStage {
+    /// Building the syntax tree
     Inserting,
+    /// Linking identifer with their declaration
     Binding,
+    /// Determining type of all values
     Typing,
+    /// Producing low-level representation
     Exporting,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ComputeEntity(Entity);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PatternEntity(Entity);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BindingEntity(Entity);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct TypeEntity(Entity);
 
 #[derive(Component, Debug)]
 enum Compute {
@@ -47,33 +63,35 @@ enum Compute {
     Int(i32),
     Float(f32),
     Bool(bool),
-    Add(Entity, Entity),
-    Sub(Entity, Entity),
-    Mul(Entity, Entity),
-    Div(Entity, Entity),
+    Add(ComputeEntity, ComputeEntity),
+    Sub(ComputeEntity, ComputeEntity),
+    Mul(ComputeEntity, ComputeEntity),
+    Div(ComputeEntity, ComputeEntity),
     Let {
         binding_ident: Span,
-        binding: Entity,
-        head: Entity,
-        tail: Entity,
+        binding: BindingEntity,
+        head: ComputeEntity,
+        tail: ComputeEntity,
     },
     Ident {
         binding_ident: Span,
-        binding: Option<Entity>,
+        binding: Option<BindingEntity>,
     },
     Lambda {
         binding_ident: Span,
-        binding: Entity,
-        body: Entity,
+        binding: BindingEntity,
+        body: ComputeEntity,
     },
-    Write(Entity),
-    Chain(Vec<Entity>, Entity),
+    /// Prints the value to stdout
+    Write(ComputeEntity),
+    Chain(Vec<ComputeEntity>, ComputeEntity),
+    /// Parse a value from stdin
     Read,
     Case {
-        on: Entity,
-        branches: Vec<(Entity, Entity)>,
+        on: ComputeEntity,
+        branches: Vec<(PatternEntity, ComputeEntity)>,
     },
-    Call(Entity, Vec<Entity>),
+    Call(ComputeEntity, Vec<ComputeEntity>),
 }
 
 #[derive(Component, Debug, Clone)]
@@ -82,11 +100,11 @@ enum Pattern {
     Any,
     Ident {
         binding_ident: Span,
-        binding: Entity,
+        binding: BindingEntity,
     },
     Variant {
         label_ident: Span,
-        fields_pattern: Vec<Entity>,
+        fields_pattern: Vec<PatternEntity>,
         index: Option<usize>,
         type_def: Option<Entity>,
     },
@@ -95,17 +113,17 @@ enum Pattern {
 #[derive(Debug, Clone)]
 struct FunParam {
     binding_ident: Span,
-    binding: Entity,
+    binding: BindingEntity,
     type_expr: Option<TypeExpr>,
 }
 
 #[derive(Component, Debug)]
 struct Fun {
     binding_ident: Span,
-    binding: Entity,
+    binding: BindingEntity,
     inputs: Vec<FunParam>,
     output_type_expr: Option<TypeExpr>,
-    body: Entity,
+    body: ComputeEntity,
 }
 
 #[derive(Debug, Clone)]
@@ -116,15 +134,15 @@ pub enum TypeExpr {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct PolyContext {
-    poly_type: Entity,
+    poly_type: TypeEntity,
     params: Vec<backend::Type>,
 }
 impl PolyContext {
-    fn new(world: &World, poly_type: Entity, params: Vec<backend::Type>) -> Self {
-        assert!(world.get::<Polymorph>(poly_type).is_some());
+    fn new(world: &World, poly_type: TypeEntity, params: Vec<backend::Type>) -> Self {
+        assert!(world.get::<Polymorph>(poly_type.0).is_some());
         assert_eq!(
             params.len(),
-            world.get::<Polymorph>(poly_type).unwrap().params.len()
+            world.get::<Polymorph>(poly_type.0).unwrap().params.len()
         );
         Self { poly_type, params }
     }
@@ -132,22 +150,22 @@ impl PolyContext {
 
 #[derive(Component, Debug, Clone, PartialEq, Eq, Hash)]
 struct Polymorph {
-    params: Vec<Entity>,
+    params: Vec<TypeEntity>,
 }
 
 #[derive(Debug, Component, Clone, Copy, PartialEq, Eq, Hash)]
-struct HasType(Entity);
+struct HasType(TypeEntity);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum TypeState {
-    Parameter { poly: Entity, index: usize },
+    Parameter { poly: TypeEntity, index: usize },
     Unknown,
-    App(TypeTerm, Vec<Entity>),
+    App(TypeTerm, Vec<TypeEntity>),
 }
 #[derive(Debug, Component, Clone, PartialEq, Eq, Hash)]
 struct Type {
     type_of: Vec<Entity>,
-    parents: Vec<(Entity, usize)>,
+    parents: Vec<(TypeEntity, usize)>,
     state: TypeState,
 }
 
@@ -164,7 +182,7 @@ enum TypeTerm {
 #[derive(Debug, Clone, Copy)]
 enum Ref {
     Inline(fn(&mut Module) -> Compute),
-    Binding(Entity),
+    Binding(BindingEntity),
     Variant { index: usize, type_def: Entity },
 }
 
@@ -178,13 +196,13 @@ enum BindingOrigin {
 #[derive(Component)]
 struct Binding {
     origin: BindingOrigin,
-    uses: Vec<Entity>,
+    uses: Vec<ComputeEntity>,
 }
 
 #[derive(Debug, Clone)]
 struct Variant {
     binding_ident: Span,
-    binding: Entity,
+    binding: BindingEntity,
     fields_type_expr: Vec<TypeExpr>,
 }
 
@@ -259,13 +277,13 @@ where
 
 struct DisplayType<'a> {
     module: &'a Module,
-    ttype: Entity,
+    ttype: TypeEntity,
 }
 impl<'a> Display for DisplayType<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self.module.get::<Type>(self.ttype).state {
+        match self.module.get::<Type>(self.ttype.0).state {
             TypeState::Parameter { index, .. } => write!(f, "{RED}'{}{RESET}", index),
-            TypeState::Unknown => write!(f, "{YELLOW}{}{RESET}", self.ttype.index()),
+            TypeState::Unknown => write!(f, "{YELLOW}{}{RESET}", self.ttype.0.index()),
             TypeState::App(term, ref params) => match (term, params.as_slice()) {
                 (TypeTerm::Nil, []) => write!(f, "{BLUE}Nil{RESET}"),
                 (TypeTerm::Int, []) => write!(f, "{BLUE}Int{RESET}"),
@@ -322,7 +340,7 @@ pub(crate) struct Module {
     compilation_stage: CompileStage,
     world: World,
     content: Rc<str>,
-    type_constraints: Vec<(Entity, Entity)>,
+    type_constraints: Vec<(TypeEntity, TypeEntity)>,
 }
 
 impl Module {
@@ -345,11 +363,11 @@ impl Module {
         assert!(self.type_constraints.is_empty());
         self.compilation_stage = CompileStage::Exporting;
     }
-    fn type_contains(&self, hay_stack: Entity, needle: Entity) -> bool {
+    fn type_contains(&self, hay_stack: TypeEntity, needle: TypeEntity) -> bool {
         if hay_stack == needle {
             return true;
         }
-        match self.get::<Type>(hay_stack).state {
+        match self.get::<Type>(hay_stack.0).state {
             TypeState::Parameter { .. } => false,
             TypeState::Unknown => false,
             TypeState::App(_, ref params) => params
@@ -396,14 +414,14 @@ impl Module {
         });
         type_def
     }
-    fn insert_pattern_litt_int(&mut self, litt: i32) -> Entity {
+    fn insert_pattern_litt_int(&mut self, litt: i32) -> PatternEntity {
         assert_eq!(self.compilation_stage, CompileStage::Inserting);
-        self.world.spawn(Pattern::Int(litt)).id()
+        PatternEntity(self.world.spawn(Pattern::Int(litt)).id())
     }
-    fn insert_pattern_any(&mut self) -> Entity {
-        self.world.spawn(Pattern::Any).id()
+    fn insert_pattern_any(&mut self) -> PatternEntity {
+        PatternEntity(self.world.spawn(Pattern::Any).id())
     }
-    fn insert_pattern_ident(&mut self, binding_ident: Span) -> Entity {
+    fn insert_pattern_ident(&mut self, binding_ident: Span) -> PatternEntity {
         assert_eq!(self.compilation_stage, CompileStage::Inserting);
         let entity = self.world.spawn_empty().id();
         let binding = self.insert_binding(BindingOrigin::Simple);
@@ -411,59 +429,63 @@ impl Module {
             binding_ident,
             binding,
         });
-        entity
+        PatternEntity(entity)
     }
     fn insert_pattern_variant(
         &mut self,
         label_ident: Span,
-        fields_pattern: Vec<Entity>,
+        fields_pattern: Vec<PatternEntity>,
         span: Span,
-    ) -> Entity {
+    ) -> PatternEntity {
         assert_eq!(self.compilation_stage, CompileStage::Inserting);
-        self.world
-            .spawn((
-                Pattern::Variant {
-                    label_ident,
-                    fields_pattern,
-                    index: None,
-                    type_def: None,
-                },
-                span,
-            ))
-            .id()
+        PatternEntity(
+            self.world
+                .spawn((
+                    Pattern::Variant {
+                        label_ident,
+                        fields_pattern,
+                        index: None,
+                        type_def: None,
+                    },
+                    span,
+                ))
+                .id(),
+        )
     }
-    fn insert_type_var(&mut self) -> Entity {
+    fn insert_type_var(&mut self) -> TypeEntity {
         assert!(matches!(
             self.compilation_stage,
             CompileStage::Binding | CompileStage::Typing
         ));
-        self.world
-            .spawn(Type {
-                type_of: Vec::new(),
-                parents: Vec::new(),
-                state: TypeState::Unknown,
-            })
-            .id()
+        TypeEntity(
+            self.world
+                .spawn(Type {
+                    type_of: Vec::new(),
+                    parents: Vec::new(),
+                    state: TypeState::Unknown,
+                })
+                .id(),
+        )
     }
     fn insert_type_app(
         &mut self,
         term: TypeTerm,
-        params: impl IntoIterator<Item = Entity>,
-    ) -> Entity {
+        params: impl IntoIterator<Item = TypeEntity>,
+    ) -> TypeEntity {
         assert!(matches!(
             self.compilation_stage,
             CompileStage::Binding | CompileStage::Typing
         ));
-        let ttype = self.world.spawn_empty().id();
-        let params: Vec<Entity> = params.into_iter().collect();
+        let ttype = TypeEntity(self.world.spawn_empty().id());
+        let params: Vec<TypeEntity> = params.into_iter().collect();
         for (index, param) in params.iter().enumerate() {
             self.world
-                .get_mut::<Type>(*param)
+                .get_mut::<Type>(param.0)
                 .unwrap()
                 .parents
                 .push((ttype, index));
         }
-        self.world.entity_mut(ttype).insert(Type {
+        self.world.entity_mut(ttype.0).insert(Type {
             type_of: Vec::new(),
             parents: Vec::new(),
             state: TypeState::App(term, params),
@@ -472,14 +494,18 @@ impl Module {
     }
     fn insert_type_app_fn(
         &mut self,
-        inputs: impl IntoIterator<Item = Entity>,
-        output: Entity,
-    ) -> Entity {
+        inputs: impl IntoIterator<Item = TypeEntity>,
+        output: TypeEntity,
+    ) -> TypeEntity {
         self.insert_type_app(TypeTerm::Fn, inputs.into_iter().chain([output]))
     }
     // TODO: use system to check integrity of relations, backward-forward linkage
-    fn polymorphic_on_rec(&mut self, type_node: Entity, map: &HashMap<Entity, Entity>) -> Entity {
-        match self.get::<Type>(type_node).state {
+    fn polymorphic_on_rec(
+        &mut self,
+        type_node: TypeEntity,
+        map: &HashMap<TypeEntity, TypeEntity>,
+    ) -> TypeEntity {
+        match self.get::<Type>(type_node.0).state {
             TypeState::Parameter { .. } => panic!("already polymorphic"),
             TypeState::Unknown => map.get(&type_node).copied().unwrap_or(type_node),
             TypeState::App(term, ref params) => {
@@ -492,19 +518,20 @@ impl Module {
             }
         }
     }
+    // TODO: need doc
     fn polymorphic_on(
         &mut self,
-        template: Entity,
-        vars: impl IntoIterator<Item = Entity>,
-    ) -> Entity {
+        template: TypeEntity,
+        vars: impl IntoIterator<Item = TypeEntity>,
+    ) -> TypeEntity {
         let vars: Vec<_> = vars.into_iter().collect();
         println!(
             "polymorphing [{}]",
             DisplayList::new(", ", vars.iter().map(|param| self.display_type(*param)))
         );
         println!("  - {}", self.display_type(template));
-        let mut map: HashMap<Entity, Entity> = HashMap::new();
-        let params: Vec<Entity> = vars
+        let mut map: HashMap<TypeEntity, TypeEntity> = HashMap::new();
+        let params: Vec<TypeEntity> = vars
             .into_iter()
             .map(|var| {
                 let new_var = self.insert_type_var();
@@ -515,26 +542,26 @@ impl Module {
             .collect();
         let poly = self.polymorphic_on_rec(template, &map);
         for (index, param) in params.iter().enumerate() {
-            let state = &mut self.world.get_mut::<Type>(*param).unwrap().state;
+            let state = &mut self.world.get_mut::<Type>(param.0).unwrap().state;
             assert_eq!(*state, TypeState::Unknown);
             *state = TypeState::Parameter { poly, index };
         }
         println!("  - {}", self.display_type(poly));
-        self.world.entity_mut(poly).insert(Polymorph { params });
+        self.world.entity_mut(poly.0).insert(Polymorph { params });
         poly
     }
-    fn set_type(&mut self, entity: Entity, ttype: Entity) {
+    fn set_type(&mut self, entity: Entity, ttype: TypeEntity) {
         assert_eq!(self.compilation_stage, CompileStage::Binding);
         assert!(self.world.get::<HasType>(entity).is_none());
         // self.update_type_var_usage_inside_type_value(&type_value, entity);
         self.world.entity_mut(entity).insert(HasType(ttype));
         self.world
-            .get_mut::<Type>(ttype)
+            .get_mut::<Type>(ttype.0)
             .unwrap()
             .type_of
             .push(entity);
     }
-    fn type_entry(&mut self, entity: Entity) -> Entity {
+    fn type_entry(&mut self, entity: Entity) -> TypeEntity {
         assert!(matches!(
             self.compilation_stage,
             CompileStage::Binding | CompileStage::Typing
@@ -545,14 +572,14 @@ impl Module {
             let ttype = self.insert_type_var();
             self.world.entity_mut(entity).insert(HasType(ttype));
             self.world
-                .get_mut::<Type>(ttype)
+                .get_mut::<Type>(ttype.0)
                 .unwrap()
                 .type_of
                 .push(entity);
             ttype
         }
     }
-    fn type_equiv<const N: usize>(&mut self, types: [Entity; N]) {
+    fn type_equiv<const N: usize>(&mut self, types: [TypeEntity; N]) {
         assert!(matches!(
             self.compilation_stage,
             CompileStage::Binding | CompileStage::Typing
@@ -562,14 +589,14 @@ impl Module {
             self.type_constraints.push((*a, *b));
         }
     }
-    fn insert_binding_relation(&mut self, binding: Entity, usage: Entity) {
+    fn insert_binding_relation(&mut self, binding: BindingEntity, usage: ComputeEntity) {
         assert_eq!(self.compilation_stage, CompileStage::Binding);
         self.world
-            .get_mut::<Binding>(binding)
+            .get_mut::<Binding>(binding.0)
             .unwrap()
             .uses
             .push(usage);
-        let mut usage = self.world.get_mut::<Compute>(usage).unwrap();
+        let mut usage = self.world.get_mut::<Compute>(usage.0).unwrap();
         let Compute::Ident { binding: bound, .. } = usage.as_mut() else {
             panic!("only ident can be bound")
         };
@@ -578,67 +605,76 @@ impl Module {
         }
         *bound = Some(binding);
     }
-    fn insert_litt_int(&mut self, litt: i32, span: Span) -> Entity {
+    fn insert_litt_int(&mut self, litt: i32, span: Span) -> ComputeEntity {
         assert_eq!(self.compilation_stage, CompileStage::Inserting);
-        self.world.spawn((Compute::Int(litt), span)).id()
+        ComputeEntity(self.world.spawn((Compute::Int(litt), span)).id())
     }
-    fn insert_litt_float(&mut self, litt: f32, span: Span) -> Entity {
+    fn insert_litt_float(&mut self, litt: f32, span: Span) -> ComputeEntity {
         assert_eq!(self.compilation_stage, CompileStage::Inserting);
-        self.world.spawn((Compute::Float(litt), span)).id()
+        ComputeEntity(self.world.spawn((Compute::Float(litt), span)).id())
     }
-    fn insert_litt_nil(&mut self, span: Option<Span>) -> Entity {
+    fn insert_litt_nil(&mut self, span: Option<Span>) -> ComputeEntity {
         assert_eq!(self.compilation_stage, CompileStage::Inserting);
         if let Some(span) = span {
-            self.world.spawn((Compute::Nil, span)).id()
+            ComputeEntity(self.world.spawn((Compute::Nil, span)).id())
         } else {
-            self.world.spawn(Compute::Nil).id()
+            ComputeEntity(self.world.spawn(Compute::Nil).id())
         }
     }
-    fn insert_add(&mut self, lhs: Entity, rhs: Entity, span: Span) -> Entity {
+    fn insert_add(&mut self, lhs: ComputeEntity, rhs: ComputeEntity, span: Span) -> ComputeEntity {
         assert_eq!(self.compilation_stage, CompileStage::Inserting);
-        self.world.spawn((Compute::Add(lhs, rhs), span)).id()
+        ComputeEntity(self.world.spawn((Compute::Add(lhs, rhs), span)).id())
     }
-    fn insert_sub(&mut self, lhs: Entity, rhs: Entity, span: Span) -> Entity {
+    fn insert_sub(&mut self, lhs: ComputeEntity, rhs: ComputeEntity, span: Span) -> ComputeEntity {
         assert_eq!(self.compilation_stage, CompileStage::Inserting);
-        self.world.spawn((Compute::Sub(lhs, rhs), span)).id()
+        ComputeEntity(self.world.spawn((Compute::Sub(lhs, rhs), span)).id())
     }
-    fn insert_mul(&mut self, lhs: Entity, rhs: Entity, span: Span) -> Entity {
+    fn insert_mul(&mut self, lhs: ComputeEntity, rhs: ComputeEntity, span: Span) -> ComputeEntity {
         assert_eq!(self.compilation_stage, CompileStage::Inserting);
-        self.world.spawn((Compute::Mul(lhs, rhs), span)).id()
+        ComputeEntity(self.world.spawn((Compute::Mul(lhs, rhs), span)).id())
     }
-    fn insert_div(&mut self, lhs: Entity, rhs: Entity, span: Span) -> Entity {
+    fn insert_div(&mut self, lhs: ComputeEntity, rhs: ComputeEntity, span: Span) -> ComputeEntity {
         assert_eq!(self.compilation_stage, CompileStage::Inserting);
-        self.world.spawn((Compute::Div(lhs, rhs), span)).id()
+        ComputeEntity(self.world.spawn((Compute::Div(lhs, rhs), span)).id())
     }
-    fn insert_read(&mut self) -> Entity {
+    fn insert_read(&mut self) -> ComputeEntity {
         assert_eq!(self.compilation_stage, CompileStage::Inserting);
-        self.world.spawn(Compute::Read).id()
+        ComputeEntity(self.world.spawn(Compute::Read).id())
     }
-    fn insert_ident(&mut self, binding_ident: Span) -> Entity {
+    fn insert_ident(&mut self, binding_ident: Span) -> ComputeEntity {
         assert_eq!(self.compilation_stage, CompileStage::Inserting);
-        self.world
-            .spawn((
-                Compute::Ident {
+        ComputeEntity(
+            self.world
+                .spawn((
+                    Compute::Ident {
+                        binding_ident,
+                        binding: None,
+                    },
                     binding_ident,
-                    binding: None,
-                },
-                binding_ident,
-            ))
-            .id()
+                ))
+                .id(),
+        )
     }
-    fn insert_binding(&mut self, origin: BindingOrigin) -> Entity {
+    fn insert_binding(&mut self, origin: BindingOrigin) -> BindingEntity {
         assert!(matches!(
             self.compilation_stage,
             CompileStage::Inserting | CompileStage::Binding
         ));
-        self.world
-            .spawn(Binding {
-                uses: Vec::new(),
-                origin,
-            })
-            .id()
+        BindingEntity(
+            self.world
+                .spawn(Binding {
+                    uses: Vec::new(),
+                    origin,
+                })
+                .id(),
+        )
     }
-    fn insert_lambda(&mut self, binding_ident: Span, body: Entity, span: Span) -> Entity {
+    fn insert_lambda(
+        &mut self,
+        binding_ident: Span,
+        body: ComputeEntity,
+        span: Span,
+    ) -> ComputeEntity {
         assert_eq!(self.compilation_stage, CompileStage::Inserting);
         let entity = self.world.spawn_empty().id();
         let binding = self.insert_binding(BindingOrigin::Simple);
@@ -650,15 +686,15 @@ impl Module {
             },
             span,
         ));
-        entity
+        ComputeEntity(entity)
     }
-    fn insert_chain(&mut self, mut insts: Vec<Entity>) -> Entity {
+    fn insert_chain(&mut self, mut insts: Vec<ComputeEntity>) -> ComputeEntity {
         if let Some(tail) = insts.pop() {
             if insts.is_empty() {
                 tail
             } else {
                 assert_eq!(self.compilation_stage, CompileStage::Inserting);
-                self.world.spawn(Compute::Chain(insts, tail)).id()
+                ComputeEntity(self.world.spawn(Compute::Chain(insts, tail)).id())
             }
         } else {
             self.insert_litt_nil(None)
@@ -669,7 +705,7 @@ impl Module {
         binding_ident: Span,
         params: Vec<(Span, Option<TypeExpr>)>,
         output_type: Option<TypeExpr>,
-        body: Entity,
+        body: ComputeEntity,
     ) -> Entity {
         assert_eq!(self.compilation_stage, CompileStage::Inserting);
         let entity = self.world.spawn_empty().id();
@@ -691,11 +727,21 @@ impl Module {
         });
         entity
     }
-    fn insert_call(&mut self, fun: Entity, params: Vec<Entity>, span: Span) -> Entity {
+    fn insert_call(
+        &mut self,
+        fun: ComputeEntity,
+        params: Vec<ComputeEntity>,
+        span: Span,
+    ) -> ComputeEntity {
         assert_eq!(self.compilation_stage, CompileStage::Inserting);
-        self.world.spawn((Compute::Call(fun, params), span)).id()
+        ComputeEntity(self.world.spawn((Compute::Call(fun, params), span)).id())
     }
-    fn insert_let(&mut self, binding_ident: Span, head: Entity, tail: Entity) -> Entity {
+    fn insert_let(
+        &mut self,
+        binding_ident: Span,
+        head: ComputeEntity,
+        tail: ComputeEntity,
+    ) -> ComputeEntity {
         assert_eq!(self.compilation_stage, CompileStage::Inserting);
         let entity = self.world.spawn_empty().id();
         let binding = self.insert_binding(BindingOrigin::Simple);
@@ -705,17 +751,21 @@ impl Module {
             head,
             tail,
         });
-        entity
+        ComputeEntity(entity)
     }
 
-    fn insert_write(&mut self, value: Entity) -> Entity {
+    fn insert_write(&mut self, value: ComputeEntity) -> ComputeEntity {
         assert_eq!(self.compilation_stage, CompileStage::Inserting);
-        self.world.spawn(Compute::Write(value)).id()
+        ComputeEntity(self.world.spawn(Compute::Write(value)).id())
     }
 
-    fn insert_case(&mut self, on: Entity, branches: Vec<(Entity, Entity)>) -> Entity {
+    fn insert_case(
+        &mut self,
+        on: ComputeEntity,
+        branches: Vec<(PatternEntity, ComputeEntity)>,
+    ) -> ComputeEntity {
         assert_eq!(self.compilation_stage, CompileStage::Inserting);
-        self.world.spawn(Compute::Case { on, branches }).id()
+        ComputeEntity(self.world.spawn(Compute::Case { on, branches }).id())
     }
 
     // TODO: use typed wrapper for typed entities
@@ -738,8 +788,8 @@ impl Module {
         &mut self,
         expr: &TypeExpr,
         context: &dyn Fn(&str) -> TypeTerm,
-        poly_vars: &HashMap<&str, Entity>,
-    ) -> Entity {
+        poly_vars: &HashMap<&str, TypeEntity>,
+    ) -> TypeEntity {
         match *expr {
             TypeExpr::Name(app_term, ref app_params) => {
                 let app_term = context(&self.content[app_term]);
@@ -759,9 +809,9 @@ impl Module {
         &mut self,
         expr: &TypeExpr,
         context: &dyn Fn(&str) -> TypeTerm,
-        poly_vars: &mut HashMap<&'a str, Entity>,
+        poly_vars: &mut HashMap<&'a str, TypeEntity>,
         content: &'a str,
-    ) -> Entity {
+    ) -> TypeEntity {
         match *expr {
             TypeExpr::Name(app_term, ref app_params) => {
                 let app_term = context(&self.content[app_term]);
@@ -787,8 +837,8 @@ impl Module {
         let content = self.content.clone();
         let poly_params = self.get::<TypeDef>(type_def).type_params.clone();
 
-        let mut poly_vars: HashMap<&str, Entity> = HashMap::new();
-        let poly_params: Vec<Entity> = poly_params
+        let mut poly_vars: HashMap<&str, TypeEntity> = HashMap::new();
+        let poly_params: Vec<TypeEntity> = poly_params
             .into_iter()
             .map(|param| {
                 let type_var = self.insert_type_var();
@@ -817,7 +867,8 @@ impl Module {
             let custom_type = self.insert_type_app(TypeTerm::Def(type_def), poly_params.clone());
             let binding_type = self.insert_type_app_fn(fields_type, custom_type);
             let binding_type = self.polymorphic_on(binding_type, poly_params.iter().copied());
-            self.set_type(variant.binding, binding_type);
+            // TODO: create trait IsTyped, and only allow those methods for entity with this trait
+            self.set_type(variant.binding.0, binding_type);
         }
     }
 
@@ -847,13 +898,13 @@ impl Module {
 
     fn bind_pattern<'a>(
         &mut self,
-        pattern: Entity,
+        pattern: PatternEntity,
         context: &dyn Fn(&str) -> Ref,
-        bound: &mut HashMap<&'a str, Entity>,
+        bound: &mut HashMap<&'a str, BindingEntity>,
         content: &'a str,
     ) {
         assert_eq!(self.compilation_stage, CompileStage::Binding);
-        match *self.world.get_mut::<Pattern>(pattern).unwrap().as_mut() {
+        match *self.world.get_mut::<Pattern>(pattern.0).unwrap().as_mut() {
             Pattern::Any => {}
             Pattern::Int(_) => {}
             Pattern::Ident {
@@ -887,10 +938,10 @@ impl Module {
         }
     }
 
-    fn bind_compute(&mut self, root: Entity, context: &dyn Fn(&str) -> Ref) {
+    fn bind_compute(&mut self, root: ComputeEntity, context: &dyn Fn(&str) -> Ref) {
         assert_eq!(self.compilation_stage, CompileStage::Binding);
         let content = self.content.clone();
-        match *self.world.get(root).unwrap() {
+        match *self.world.get(root.0).unwrap() {
             Compute::Call(fun, ref params) => {
                 let params = params.clone();
                 self.bind_compute(fun, context);
@@ -977,7 +1028,7 @@ impl Module {
                 match context(&content[binding_ident]) {
                     Ref::Inline(construct) => {
                         let replace = construct(self);
-                        *self.world.get_mut::<Compute>(root).unwrap() = replace
+                        *self.world.get_mut::<Compute>(root.0).unwrap() = replace
                     }
                     Ref::Binding(binding) => self.insert_binding_relation(binding, root),
                     Ref::Variant { index, type_def } => {
@@ -1003,7 +1054,7 @@ impl Module {
         let output_type_expr = output_type_expr.clone();
 
         let content = self.content.clone();
-        let mut poly_vars: HashMap<&str, Entity> = HashMap::new();
+        let mut poly_vars: HashMap<&str, TypeEntity> = HashMap::new();
         // let mut poly_params: Vec<Entity> = Vec::new();
         let mut inputs_type = Vec::new();
         for FunParam { type_expr, .. } in input {
@@ -1026,7 +1077,7 @@ impl Module {
 
         let binding_type = self.insert_type_app_fn(inputs_type, output_type);
         let binding_type = self.polymorphic_on(binding_type, poly_vars.values().copied());
-        self.set_type(binding, binding_type);
+        self.set_type(binding.0, binding_type);
     }
     fn typify_function_body(&mut self, fun: Entity) {
         assert_eq!(self.compilation_stage, CompileStage::Typing);
@@ -1043,25 +1094,25 @@ impl Module {
 
         let mut fn_type_params = Vec::new();
         for FunParam { binding, .. } in input.into_iter() {
-            fn_type_params.push(self.type_entry(binding));
+            fn_type_params.push(self.type_entry(binding.0));
         }
         fn_type_params.push(body_type);
         let fn_type = self.insert_type_app(TypeTerm::Fn, fn_type_params);
-        let ttype = self.type_entry(binding);
+        let ttype = self.type_entry(binding.0);
         self.type_equiv([ttype, fn_type]);
     }
 
-    fn typify_pattern(&mut self, pattern: Entity) -> Entity {
+    fn typify_pattern(&mut self, pattern: PatternEntity) -> TypeEntity {
         assert_eq!(self.compilation_stage, CompileStage::Typing);
-        let ttype = self.type_entry(pattern);
-        match *self.get(pattern) {
+        let ttype = self.type_entry(pattern.0);
+        match *self.get(pattern.0) {
             Pattern::Any => {}
             Pattern::Int(_) => {
                 let int_type = self.insert_type_app(TypeTerm::Int, []);
                 self.type_equiv([ttype, int_type]);
             }
             Pattern::Ident { binding, .. } => {
-                let binding = self.type_entry(binding);
+                let binding = self.type_entry(binding.0);
                 self.type_equiv([ttype, binding]);
             }
             Pattern::Variant {
@@ -1071,8 +1122,11 @@ impl Module {
                 ..
             } => {
                 let fields_pattern = fields_pattern.clone();
-                let HasType(binding_type) = *self
-                    .get(self.get::<TypeDef>(type_def.unwrap()).variants[index.unwrap()].binding);
+                let HasType(binding_type) = *self.get(
+                    self.get::<TypeDef>(type_def.unwrap()).variants[index.unwrap()]
+                        .binding
+                        .0,
+                );
                 let binding_type = self.instantiate_type(binding_type);
                 let inputs: Vec<_> = fields_pattern
                     .into_iter()
@@ -1085,12 +1139,16 @@ impl Module {
         ttype
     }
 
-    fn type_clone_map(&mut self, ttype: Entity, map: &HashMap<Entity, Entity>) -> Entity {
+    fn type_clone_map(
+        &mut self,
+        ttype: TypeEntity,
+        map: &HashMap<TypeEntity, TypeEntity>,
+    ) -> TypeEntity {
         assert_eq!(self.compilation_stage, CompileStage::Typing);
         if let Some(mapped) = map.get(&ttype) {
             *mapped
         } else {
-            match self.get::<Type>(ttype).state {
+            match self.get::<Type>(ttype.0).state {
                 TypeState::Parameter { .. } => ttype,
                 TypeState::Unknown => ttype,
                 TypeState::App(term, ref params) => {
@@ -1105,16 +1163,16 @@ impl Module {
         }
     }
 
-    fn display_type(&self, ttype: Entity) -> DisplayType {
+    fn display_type(&self, ttype: TypeEntity) -> DisplayType {
         DisplayType {
             module: self,
             ttype,
         }
     }
 
-    fn instantiate_type(&mut self, ttype: Entity) -> Entity {
+    fn instantiate_type(&mut self, ttype: TypeEntity) -> TypeEntity {
         assert_eq!(self.compilation_stage, CompileStage::Typing);
-        if let Some(poly) = self.world.get::<Polymorph>(ttype) {
+        if let Some(poly) = self.world.get::<Polymorph>(ttype.0) {
             let params = poly.params.clone();
             println!(
                 "instantiating [{}]",
@@ -1133,10 +1191,10 @@ impl Module {
         }
     }
 
-    fn typify_compute(&mut self, compute: Entity) -> Entity {
+    fn typify_compute(&mut self, compute: ComputeEntity) -> TypeEntity {
         assert_eq!(self.compilation_stage, CompileStage::Typing);
-        let ttype = self.type_entry(compute);
-        match *self.get(compute) {
+        let ttype = self.type_entry(compute.0);
+        match *self.get(compute.0) {
             Compute::Nil => {
                 let nil_type = self.insert_type_app(TypeTerm::Nil, []);
                 self.type_equiv([ttype, nil_type]);
@@ -1190,7 +1248,7 @@ impl Module {
                 self.type_equiv([fun, fn_type]);
             }
             Compute::Ident { binding, .. } => {
-                let binding_type = self.type_entry(binding.unwrap());
+                let binding_type = self.type_entry(binding.unwrap().0);
                 let binding_type = self.instantiate_type(binding_type);
                 self.type_equiv([ttype, binding_type]);
             }
@@ -1202,7 +1260,7 @@ impl Module {
                 self.type_equiv([ttype, tail]);
             }
             Compute::Lambda { binding, body, .. } => {
-                let binding = self.type_entry(binding);
+                let binding = self.type_entry(binding.0);
                 let body = self.typify_compute(body);
                 let fn_type = self.insert_type_app(TypeTerm::Fn, [binding, body]);
                 self.type_equiv([ttype, fn_type]);
@@ -1213,7 +1271,7 @@ impl Module {
                 tail,
                 ..
             } => {
-                let binding = self.type_entry(binding);
+                let binding = self.type_entry(binding.0);
                 let head = self.typify_compute(head);
                 let tail = self.typify_compute(tail);
                 self.type_equiv([binding, head]);
@@ -1233,7 +1291,7 @@ impl Module {
         ttype
     }
 
-    fn substitute_type_var(&mut self, this: Entity, by: Entity) {
+    fn substitute_type_var(&mut self, this: TypeEntity, by: TypeEntity) {
         assert_eq!(self.compilation_stage, CompileStage::Typing);
         println!(
             "substituting {} by {}",
@@ -1242,22 +1300,22 @@ impl Module {
         );
         assert_ne!(this, by);
 
-        let mut by_data = self.get::<Type>(by).clone();
-        let this_data = self.get::<Type>(this).clone();
+        let mut by_data = self.get::<Type>(by.0).clone();
+        let this_data = self.get::<Type>(this.0).clone();
 
         for type_of in this_data.type_of {
             *self.world.get_mut(type_of).unwrap() = HasType(by);
             by_data.type_of.push(type_of);
         }
         for (parent, index) in this_data.parents {
-            let mut parent_data = self.world.get_mut::<Type>(parent).unwrap();
+            let mut parent_data = self.world.get_mut::<Type>(parent.0).unwrap();
             let TypeState::App(_, params) = &mut parent_data.state else {
                 panic!()
             };
             params[index] = by;
             by_data.parents.push((parent, index));
         }
-        *self.world.get_mut::<Type>(by).unwrap() = by_data;
+        *self.world.get_mut::<Type>(by.0).unwrap() = by_data;
 
         match this_data.state {
             TypeState::Parameter { .. } => panic!("type is not a var"),
@@ -1281,8 +1339,8 @@ impl Module {
             if lhs == rhs {
                 continue;
             };
-            let lhs_data = self.get::<Type>(lhs).clone();
-            let rhs_data = self.get::<Type>(rhs).clone();
+            let lhs_data = self.get::<Type>(lhs.0).clone();
+            let rhs_data = self.get::<Type>(rhs.0).clone();
             match (lhs_data.state, rhs_data.state) {
                 (TypeState::Parameter { .. }, TypeState::App(_, _)) => {
                     panic!(
@@ -1330,9 +1388,9 @@ impl Module {
         Ok(())
     }
 
-    fn machine_type(&self, poly_context: &PolyContext, ttype: Entity) -> backend::Type {
+    fn machine_type(&self, poly_context: &PolyContext, ttype: TypeEntity) -> backend::Type {
         assert_eq!(self.compilation_stage, CompileStage::Exporting);
-        match self.get::<Type>(ttype).state {
+        match self.get::<Type>(ttype.0).state {
             TypeState::Unknown => backend::Type::Unit,
             TypeState::Parameter { index, poly } => {
                 assert_eq!(poly, poly_context.poly_type);
@@ -1374,13 +1432,13 @@ impl Module {
 
     fn export_pattern_match_to_machine(
         &self,
-        pattern: Entity,
+        pattern: PatternEntity,
         poly_context: &PolyContext,
         on: Inst,
         on_type: backend::Type,
     ) -> Inst {
         assert_eq!(self.compilation_stage, CompileStage::Exporting);
-        match *self.get(pattern) {
+        match *self.get(pattern.0) {
             Pattern::Any => Inst::Const(Value::Bool(true)),
             Pattern::Int(value) => Inst::Eq(
                 on_type,
@@ -1401,7 +1459,7 @@ impl Module {
                 ));
                 for (index, field_pattern) in fields_pattern.iter().copied().enumerate() {
                     // let field_binding = module.new_id();
-                    let HasType(field_type) = *self.get(field_pattern);
+                    let HasType(field_type) = *self.get(field_pattern.0);
                     let ttype = self.machine_type(poly_context, field_type);
 
                     matchers.push(self.export_pattern_match_to_machine(
@@ -1418,14 +1476,15 @@ impl Module {
     }
     fn export_pattern_bind_to_machine<'a>(
         &self,
-        pattern: Entity,
+        pattern: PatternEntity,
         poly_context: &PolyContext,
         on_inst: Inst,
-        // module: ComputeWritter,
-        mut bindings: Box<dyn FnMut(Entity, &PolyContext, Entity, Exporter) -> Inst + 'a>,
-    ) -> Box<dyn FnMut(Entity, &PolyContext, Entity, Exporter) -> Inst + 'a> {
+        mut bindings: Box<
+            dyn FnMut(BindingEntity, &PolyContext, TypeEntity, Exporter) -> Inst + 'a,
+        >,
+    ) -> Box<dyn FnMut(BindingEntity, &PolyContext, TypeEntity, Exporter) -> Inst + 'a> {
         assert_eq!(self.compilation_stage, CompileStage::Exporting);
-        match *self.get(pattern) {
+        match *self.get(pattern.0) {
             Pattern::Any => bindings,
             Pattern::Int(_) => bindings,
             Pattern::Ident { binding, .. } => {
@@ -1443,7 +1502,7 @@ impl Module {
             } => fields_pattern.iter().copied().enumerate().fold(
                 bindings,
                 |bindings, (index, field_pattern)| {
-                    let HasType(field_type) = *self.get(field_pattern);
+                    let HasType(field_type) = *self.get(field_pattern.0);
                     let ttype = self.machine_type(poly_context, field_type);
                     self.export_pattern_bind_to_machine(
                         field_pattern,
@@ -1457,9 +1516,9 @@ impl Module {
         }
     }
 
-    fn extract_fn_type(&self, fn_type: Entity) -> (Vec<Entity>, Entity) {
+    fn extract_fn_type(&self, fn_type: TypeEntity) -> (Vec<TypeEntity>, TypeEntity) {
         assert_eq!(self.compilation_stage, CompileStage::Exporting);
-        let TypeState::App(TypeTerm::Fn, ref params) = self.get::<Type>(fn_type).state else {
+        let TypeState::App(TypeTerm::Fn, ref params) = self.get::<Type>(fn_type.0).state else {
             panic!()
         };
         let [inputs @ .., output] = params.as_slice() else {
@@ -1473,11 +1532,12 @@ impl Module {
         function_index: usize,
         function: Entity,
         module: Exporter,
-        bindings: &mut dyn FnMut(Entity, &PolyContext, Entity, Exporter) -> Inst,
+        bindings: &mut dyn FnMut(BindingEntity, &PolyContext, TypeEntity, Exporter) -> Inst,
     ) {
         let binding = self.get::<Fun>(function).binding;
-        let HasType(binding_type) = *self.get(binding);
-        assert!(self.get::<Polymorph>(binding_type).params.is_empty());
+        let HasType(binding_type) = *self.get(binding.0);
+        // TODO: maybe use wrapper for poly types
+        assert!(self.get::<Polymorph>(binding_type.0).params.is_empty());
         let poly_context = PolyContext::new(&self.world, binding_type, Vec::new());
         self.export_function_to_machine(&poly_context, function_index, function, module, bindings);
     }
@@ -1496,7 +1556,7 @@ impl Module {
             &self.content[variant.binding_ident], poly_context.params, function_index,
         );
         // TODO: remove ambiguity from where the poly type comes from
-        let HasType(binding_type) = *self.get(variant.binding);
+        let HasType(binding_type) = *self.get(variant.binding.0);
         assert_eq!(binding_type, poly_context.poly_type);
         let (inputs, output) = self.extract_fn_type(binding_type);
         let inputs: Vec<_> = inputs
@@ -1519,14 +1579,14 @@ impl Module {
     fn resolve_top_level_binding(
         &self,
         poly_context: &PolyContext,
-        binding: Entity,
-        usage_type: Entity,
+        binding: BindingEntity,
+        usage_type: TypeEntity,
         mut module: Exporter,
-        bindings: &mut HashMap<(Entity, PolyContext), Inst>,
+        bindings: &mut HashMap<(BindingEntity, PolyContext), Inst>,
     ) -> Inst {
         assert_eq!(self.compilation_stage, CompileStage::Exporting);
-        let HasType(binding_type) = *self.get(binding);
-        let context = if let Some(poly) = self.world.get::<Polymorph>(binding_type) {
+        let HasType(binding_type) = *self.get(binding.0);
+        let context = if let Some(poly) = self.world.get::<Polymorph>(binding_type.0) {
             let mut discovered = HashMap::new();
             println!("inferring poly params");
             println!("  - poly type {}", self.display_type(binding_type));
@@ -1559,7 +1619,7 @@ impl Module {
         if let Some(binding) = bindings.get(&(binding, context.clone())) {
             return binding.clone();
         }
-        match self.get::<Binding>(binding).origin {
+        match self.get::<Binding>(binding.0).origin {
             BindingOrigin::FunctionDecl(function) => {
                 let function_index = module.reserve_fn();
                 let inst = Inst::Const(Value::Fn(function_index));
@@ -1596,14 +1656,14 @@ impl Module {
 
     fn export_compute_to_machine(
         &self,
-        compute: Entity,
+        compute: ComputeEntity,
         poly_context: &PolyContext,
         mut exporter: Exporter,
-        bindings: &mut dyn FnMut(Entity, &PolyContext, Entity, Exporter) -> Inst,
+        bindings: &mut dyn FnMut(BindingEntity, &PolyContext, TypeEntity, Exporter) -> Inst,
     ) -> Inst {
         assert_eq!(self.compilation_stage, CompileStage::Exporting);
-        let HasType(ttype) = *self.get(compute);
-        match *self.get(compute) {
+        let HasType(ttype) = *self.get(compute.0);
+        match *self.get(compute.0) {
             Compute::Nil => Inst::Const(Value::Unit),
             Compute::Int(value) => Inst::Const(Value::Int32(value)),
             Compute::Float(value) => Inst::Const(Value::Float32(value)),
@@ -1738,7 +1798,7 @@ impl Module {
                 tail,
                 ..
             } => {
-                let HasType(binding_type) = *self.get(binding);
+                let HasType(binding_type) = *self.get(binding.0);
                 let binding_type = self.machine_type(poly_context, binding_type);
                 let head =
                     self.export_compute_to_machine(head, poly_context, exporter.get(), bindings);
@@ -1758,8 +1818,8 @@ impl Module {
                 })
             }
             Compute::Lambda { binding, body, .. } => {
-                let HasType(binding_type) = *self.get(binding);
-                let HasType(body_type) = *self.get(body);
+                let HasType(binding_type) = *self.get(binding.0);
+                let HasType(body_type) = *self.get(body.0);
                 let input_type = self.machine_type(poly_context, binding_type);
                 let output_type = self.machine_type(poly_context, body_type);
                 let index = exporter.reserve_fn();
@@ -1785,7 +1845,7 @@ impl Module {
                 )
             }
             Compute::Case { on, ref branches } => {
-                let HasType(on_type) = *self.get(on);
+                let HasType(on_type) = *self.get(on.0);
                 let branches = branches.clone();
                 let on_type = self.machine_type(poly_context, on_type);
                 let ttype = self.machine_type(poly_context, ttype);
@@ -1823,8 +1883,11 @@ impl Module {
         }
     }
 
-    fn type_eq(&self, lhs: Entity, rhs: Entity) -> bool {
-        match (&self.get::<Type>(lhs).state, &self.get::<Type>(rhs).state) {
+    fn type_eq(&self, lhs: TypeEntity, rhs: TypeEntity) -> bool {
+        match (
+            &self.get::<Type>(lhs.0).state,
+            &self.get::<Type>(rhs.0).state,
+        ) {
             (TypeState::Unknown, TypeState::Unknown) => true,
             (lhs @ TypeState::Parameter { .. }, rhs @ TypeState::Parameter { .. }) => lhs == rhs,
             (TypeState::App(lhs_term, lhs_params), TypeState::App(rhs_term, rhs_params)) => {
@@ -1838,16 +1901,16 @@ impl Module {
 
     fn infer_poly_params_from_usage(
         &self,
-        poly_data: Entity,
-        poly_type: Entity,
-        usage: Entity,
-        discovered: &mut HashMap<usize, Entity>,
+        poly_data: TypeEntity,
+        poly_type: TypeEntity,
+        usage: TypeEntity,
+        discovered: &mut HashMap<usize, TypeEntity>,
     ) {
         assert_eq!(self.compilation_stage, CompileStage::Exporting);
-        match self.get::<Type>(poly_type).state {
+        match self.get::<Type>(poly_type.0).state {
             TypeState::Parameter { poly, index } => {
                 assert_eq!(poly, poly_data);
-                assert_eq!(poly_type, self.get::<Polymorph>(poly_data).params[index]);
+                assert_eq!(poly_type, self.get::<Polymorph>(poly_data.0).params[index]);
                 match discovered.entry(index) {
                     Entry::Occupied(entry) => {
                         assert!(self.type_eq(*entry.get(), usage));
@@ -1859,7 +1922,7 @@ impl Module {
             }
             TypeState::Unknown => {}
             TypeState::App(_, ref poly_params) => {
-                let TypeState::App(_, ref usage_params) = self.get::<Type>(usage).state else {
+                let TypeState::App(_, ref usage_params) = self.get::<Type>(usage.0).state else {
                     panic!()
                 };
                 for (poly_param, usage_param) in
@@ -1882,7 +1945,7 @@ impl Module {
         function_index: usize,
         function: Entity,
         mut exporter: Exporter,
-        bindings: &mut dyn FnMut(Entity, &PolyContext, Entity, Exporter) -> Inst,
+        bindings: &mut dyn FnMut(BindingEntity, &PolyContext, TypeEntity, Exporter) -> Inst,
     ) -> Inst {
         assert_eq!(self.compilation_stage, CompileStage::Exporting);
         let function_data: &Fun = self.get(function);
@@ -1891,8 +1954,8 @@ impl Module {
             &self.content[function_data.binding_ident], poly_context.params, function_index,
         );
 
-        let HasType(function_type) = *self.get(function_data.binding);
-        let poly_data = self.get::<Polymorph>(function_type);
+        let HasType(function_type) = *self.get(function_data.binding.0);
+        let poly_data = self.get::<Polymorph>(function_type.0);
         assert_eq!(poly_data.params.len(), poly_context.params.len());
         assert_eq!(function_type, poly_context.poly_type);
 
@@ -1900,12 +1963,12 @@ impl Module {
             .inputs
             .iter()
             .map(|FunParam { binding, .. }| {
-                let HasType(binding_type) = *self.get(*binding);
+                let HasType(binding_type) = *self.get(binding.0);
                 let binding_type = self.machine_type(&poly_context, binding_type);
                 (binding_type, *binding)
             })
             .unzip();
-        let HasType(body_type) = *self.get(function_data.body);
+        let HasType(body_type) = *self.get(function_data.body.0);
         let output_type = self.machine_type(poly_context, body_type);
         exporter.insert_fun(
             function_index,
@@ -2040,7 +2103,7 @@ fn main() {
 
     let mut machine = backend::Module::new();
     let mut bindings_map = HashMap::new();
-    let mut bindings = |b: Entity, pc: &PolyContext, ut, m: Exporter| {
+    let mut bindings = |b: BindingEntity, pc: &PolyContext, ut, m: Exporter| {
         module.resolve_top_level_binding(pc, b, ut, m, &mut bindings_map)
     };
     // let mut types_map = HashMap::new();

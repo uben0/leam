@@ -1,4 +1,4 @@
-use super::{Entity, Module, Span, TypeExpr};
+use super::{Entity, Module, Span, TypeExpr, ComputeEntity, PatternEntity};
 
 grammar(module: &mut Module);
 
@@ -20,7 +20,7 @@ FunParam: (Span, Option<TypeExpr>) = {
 	<name:Lower> ":" <ttype:Type> => (name, Some(ttype)),
 }
 
-Expr0: Entity = {
+Expr0: ComputeEntity = {
 	<l:@L> <v:Int> <r:@R> => module.insert_litt_int(v, Span(l, r)),
 	<l:@L> <v:Float> <r:@R> => module.insert_litt_float(v, Span(l, r)),
 	Lower => module.insert_ident(<>),
@@ -28,7 +28,7 @@ Expr0: Entity = {
 	"{" <Chain> "}" => <>,
 }
 
-Expr1: Entity = {
+Expr1: ComputeEntity = {
 	Expr0,
 	<l:@L> <fun:Expr0> "(" <params:List<Expr3>> ")" <r:@R> => module.insert_call(fun, params, Span(l, r)),
 	<l:@L> "fn" "(" <ident:Lower> ")" <body:Expr0> <r:@R> => module.insert_lambda(ident, body, Span(l, r)),
@@ -37,19 +37,19 @@ Expr1: Entity = {
 	"case" <on:Expr1> "{" <branches:(<Pattern> "->" <Expr3>)*> "}" => module.insert_case(on, branches),
 }
 
-Expr2: Entity = {
+Expr2: ComputeEntity = {
 	Expr1,
 	<l:@L> <lhs:Expr2> "+" <rhs:Expr1> <r:@R> => module.insert_add(lhs, rhs, Span(l, r)),
 	<l:@L> <lhs:Expr2> "-" <rhs:Expr1> <r:@R> => module.insert_sub(lhs, rhs, Span(l, r)),
 }
 
-Expr3: Entity = {
+Expr3: ComputeEntity = {
 	Expr2,
 	<l:@L> <lhs:Expr3> "*" <rhs:Expr2> <r:@R> => module.insert_mul(lhs, rhs, Span(l, r)),
 	<l:@L> <lhs:Expr3> "/" <rhs:Expr2> <r:@R> => module.insert_div(lhs, rhs, Span(l, r)),
 }
 
-Chain: Entity = {
+Chain: ComputeEntity = {
 	<insts:Expr3*> => module.insert_chain(insts),
 	<mut insts:Expr3*> "let" <ident:Lower> "=" <head:Expr3> <tail:Chain> => {
 		insts.push(module.insert_let(ident, head, tail));
@@ -57,7 +57,7 @@ Chain: Entity = {
 	},
 }
 
-Pattern: Entity = {
+Pattern: PatternEntity = {
 	"_" => module.insert_pattern_any(),
 	Int => module.insert_pattern_litt_int(<>),
 	Lower => module.insert_pattern_ident(<>),

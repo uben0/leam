@@ -13,7 +13,9 @@ pub enum Type {
     Nat32,
     Float32,
     Fn,
+    // TODO: remove block
     Block,
+    // use prod and sum instead
     Prod(Vec<Type>),
     Sum(Vec<Type>),
     Ptr,
